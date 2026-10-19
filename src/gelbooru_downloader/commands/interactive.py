@@ -235,8 +235,17 @@ def _render_preview(url: str | None) -> None:
 
         import httpx
 
-        response = httpx.get(url, timeout=15.0, follow_redirects=True)
+        headers = {}
+        from urllib.parse import urlsplit
+
+        host = (urlsplit(url).hostname or "").lower()
+        if host == "gelbooru.com" or host.endswith(".gelbooru.com"):
+            headers["Referer"] = "https://gelbooru.com/"
+        response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
         response.raise_for_status()
+        content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if not content_type.startswith("image/"):
+            return
         suffix = ".png"
         lowered = url.lower().split("?", 1)[0]
         for ext in (".jpg", ".jpeg", ".webp", ".gif"):
