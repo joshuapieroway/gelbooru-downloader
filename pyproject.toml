@@ -30,14 +30,6 @@ dependencies = [
     "pydantic>=2.7",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.2",
-    "pytest-asyncio>=0.23",
-    "ruff>=0.6",
-    "build>=1.2",
-]
-
 [project.urls]
 Homepage = "https://github.com/joshuapieroway/gelbooru-downloader"
 Issues = "https://github.com/joshuapieroway/gelbooru-downloader/issues"
@@ -48,17 +40,10 @@ gelbooru = "gelbooru_downloader.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/gelbooru_downloader"]
 
-[tool.pytest.ini_options]
-minversion = "8.0"
-testpaths = ["tests"]
-asyncio_mode = "auto"
-filterwarnings = ["error::DeprecationWarning:gelbooru_downloader.*"]
-addopts = "-q"
-
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "T20", "ANN", "PTH", "ARG", "ASYNC", "S", "PL"]
@@ -82,21 +67,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = [
-    "ANN",
-    "ASYNC",
-    "PTH",
-    "ARG",
-    "S101",    # asserts are the point of a test suite
-    "S105",
-    "S106",
-    "S108",    # tests may use /tmp
-    "PLR2004",
-    "B008",
-    "N806",
-    "PLR0913",
-    "PLR0917",
-]
 "src/gelbooru_downloader/commands/*" = ["B008", "ANN401", "RUF001"]
 # The "×" in dimension columns is intentional, not a look-alike typo.
 "src/gelbooru_downloader/console.py" = ["RUF001"]

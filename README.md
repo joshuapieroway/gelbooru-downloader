@@ -64,10 +64,11 @@ State lives in `~/.config/gelbooru-downloader/` and `~/.local/share/gelbooru-dow
 
 ## Development
 
+Tests and dev tooling live on the `development` branch. On `main`:
+
 ```bash
-.venv/bin/python -m pytest          # 429 tests
-.venv/bin/ruff check src tests      # lint
-.venv/bin/ruff format src tests     # format
+.venv/bin/ruff check src      # lint
+.venv/bin/ruff format src     # format
 ```
 
 ## License

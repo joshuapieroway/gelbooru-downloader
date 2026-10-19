@@ -10,7 +10,8 @@ factual and up to date — update it when the codebase or tooling changes.
   runnable as `python -m gelbooru_downloader`.
 - Dependencies: `httpx`, `typer`, `rich`, `pydantic`. Dev: `pytest`,
   `pytest-asyncio`, `ruff`, `build`.
-- 429 tests pass; `ruff check src tests` is clean.
+- Tests live on the `development` branch; `main` ships runtime code only.
+  `ruff check src` is clean on `main`.
 
 ## Working in this repo
 
@@ -18,13 +19,12 @@ factual and up to date — update it when the codebase or tooling changes.
 # set up (venv already exists at .venv on this machine)
 .venv/bin/python -m pip install -e ".[dev]"
 
-# tests
-.venv/bin/python -m pytest            # full suite
-.venv/bin/python -m pytest tests/test_api.py -q
+# (tests are on the `development` branch)
+# .venv/bin/python -m pytest            # full suite
 
 # lint / format
-.venv/bin/ruff check src tests
-.venv/bin/ruff format src tests
+.venv/bin/ruff check src
+.venv/bin/ruff format src
 
 # run the CLI
 .venv/bin/gelbooru --help
