@@ -23,6 +23,7 @@ from rich.logging import RichHandler
 from . import __version__
 from .app import AppContext, create_context, get_context, set_context
 from .commands import batch as batch_commands
+from .commands import browse as browse_commands
 from .commands import config_cmd
 from .commands import download as download_commands
 from .commands import interactive as interactive_commands
@@ -211,6 +212,9 @@ app.command("download", help="Search for posts and download them.")(
     command_guard(download_commands.download)
 )
 app.command("batch", help="Run many searches from a file.")(command_guard(batch_commands.batch))
+app.command("browse", help="Browse search results as a paged list with thumbnails.")(
+    command_guard(browse_commands.browse)
+)
 app.command("watch", help="Repeat a search on an interval and fetch new posts.")(
     command_guard(batch_commands.watch)
 )
