@@ -15,6 +15,7 @@ from rich.prompt import Prompt
 
 from ..app import AppContext, get_context, run_async
 from ..console import (
+    _rating_text,
     format_post_table,
     ok,
     print_post_detail,
@@ -36,6 +37,7 @@ __all__ = ["interactive_command", "run_interactive"]
 _HELP = """[bold]commands[/]
   [info]search <tags> [-n 25][/]                search and show a result table
   [info]download <tags> [-n 25] [-o DIR][/]    search and download the results
+  [info]browse <tags> [-n 25] [--images][/]    paged list with thumbnails and titles
   [info]info <post_id>[/]                      show one post in detail
   [info]dl <post_id...[/]                      download specific posts
   [info]export <tags> <json|csv> <file>[/]     save search results to a file
@@ -102,6 +104,8 @@ def _dispatch(app: AppContext, line: str, *, output: Path | None, limit: int) ->
         app.console.print(_HELP)
     elif command in {"search", "find", "s"}:
         _cmd_search(app, args, limit=limit)
+    elif command in {"browse", "br", "b"}:
+        _cmd_browse(app, args, limit=limit)
     elif command in {"download", "dl", "d"}:
         _cmd_download(app, args, output=output, limit=limit)
     elif command in {"info", "show", "post"}:
@@ -212,6 +216,121 @@ def _cmd_search(app: AppContext, args: list[str], *, limit: int) -> None:
         filtered_out=outcome.filtered_out,
         elapsed=outcome.elapsed,
     )
+
+
+def _supports_inline_images() -> bool:
+    import os
+
+    return bool(os.environ.get("KITTY_WINDOW_ID")) or "kitty" in os.environ.get("TERM", "")
+
+
+def _render_preview(url: str | None) -> None:
+    if not url:
+        return
+    if not _supports_inline_images():
+        return
+    try:
+        import subprocess
+        import tempfile
+
+        import httpx
+
+        response = httpx.get(url, timeout=15.0, follow_redirects=True)
+        response.raise_for_status()
+        suffix = ".png"
+        lowered = url.lower().split("?", 1)[0]
+        for ext in (".jpg", ".jpeg", ".webp", ".gif"):
+            if lowered.endswith(ext):
+                suffix = ext
+                break
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(response.content)
+            path = handle.name
+        try:
+            subprocess.run(  # noqa: S603
+                ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
+                check=False,
+                stdout=None,
+                stderr=subprocess.DEVNULL,
+            )
+        finally:
+            import contextlib
+            from pathlib import Path
+
+            with contextlib.suppress(OSError):
+                Path(path).unlink(missing_ok=True)
+    except Exception:
+        return
+
+
+def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
+
+    known = {
+        "-n": "limit",
+        "--limit": "limit",
+        "--images": "flag",
+    }
+    parsed, positional, unknown = _parse_flags(args, known)
+    _flag_help(app, unknown)
+    tags = " ".join(positional)
+    if not tags:
+        warn(app.console, "usage: browse <tags> [-n 25] [--images]")
+        return
+    try:
+        requested = int(parsed.get("limit") or limit)
+    except ValueError:
+        warn(app.console, "-n/--limit must be a number")
+        return
+    want_images = "images" in parsed.get("_flags", []) or _supports_inline_images()
+
+    with app.console.status(f"[brand]searching {tags}…", spinner="dots"):
+        outcome = run_search(
+            app,
+            tags=tags,
+            limit=requested,
+            page_size=app.config.general.page_size,
+        )
+    if not outcome.posts:
+        warn(app.console, f"nothing matched '{tags}'")
+        return
+
+    posts = outcome.posts
+    page_size = 4
+    page = 0
+    total_pages = max(1, -(-len(posts) // page_size))
+    while True:
+        app.console.print(f"[muted]page {page + 1}/{total_pages} · {len(posts)} post(s)[/]")
+        start = page * page_size
+        for offset, post in enumerate(posts[start : start + page_size], start):
+            app.console.print(
+                f"[id]{offset + 1}.[/] [id]{post.id}[/]  {_rating_text(post.rating)}  "
+                f"{post.width or '?'}×{post.height or '?'}  {post.summary(4)}"
+            )
+            if want_images:
+                _render_preview(post.preview_url or post.file_url)
+            elif post.preview_url:
+                app.console.print(f"   [muted]{post.preview_url}[/]")
+        app.console.print("")
+        choices = []
+        if page > 0:
+            choices.append("p")
+        if page < total_pages - 1:
+            choices.append("n")
+        choices.append("q")
+        prompt = "/".join(choices)
+        try:
+            raw = Prompt.ask(f"[brand]browse[/] ({prompt})", default="q", show_default=False)
+        except (EOFError, KeyboardInterrupt):
+            return
+        raw = raw.strip().lower()
+        if raw in {"q", "quit", "exit"}:
+            return
+        if raw in {"n", "next"} and page < total_pages - 1:
+            page += 1
+        elif raw in {"p", "prev", "previous"} and page > 0:
+            page -= 1
+        else:
+            warn(app.console, f"unknown command {raw!r}")
 
 
 def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limit: int) -> None:
