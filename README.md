@@ -1,7 +1,7 @@
 # Gelbooru Downloader
 
 A fast, async terminal client for the [Gelbooru](https://gelbooru.com) image board.
-Search by tags, inspect posts, and download original files concurrently — with
+Search by tags, inspect posts, and download original files concurrently with
 resumable transfers, a SQLite download history, presets, and a rich terminal UI.
 
 ## Install
