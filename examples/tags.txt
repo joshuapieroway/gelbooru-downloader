@@ -1,7 +1,0 @@
-# Example tag file for `gelbooru batch`
-# One tag expression per line; blank lines and #-comments are ignored.
-
-blue_hair solo
-landscape sky
-cat_ears -rating:explicit
-1girl long_hair rating:safe
