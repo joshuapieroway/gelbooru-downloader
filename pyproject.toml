@@ -39,8 +39,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/example/gelbooru-cli"
-Issues = "https://github.com/example/gelbooru-cli/issues"
+Homepage = "https://github.com/joshuapieroway/gelbooru-downloader"
+Issues = "https://github.com/joshuapieroway/gelbooru-downloader/issues"
 
 [project.scripts]
 gelbooru = "gelbooru_downloader.cli:main"

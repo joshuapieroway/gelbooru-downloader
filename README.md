@@ -9,7 +9,7 @@ resumable transfers, a SQLite download history, presets, and a rich terminal UI.
 Requires Python 3.12+.
 
 ```bash
-git clone https://github.com/<you>/gelbooru-downloader.git
+git clone https://github.com/joshuapieroway/gelbooru-downloader.git
 cd gelbooru-downloader
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"

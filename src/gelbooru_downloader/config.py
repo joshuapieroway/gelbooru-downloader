@@ -91,7 +91,7 @@ class NetworkConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_url: str = "https://gelbooru.com"
-    user_agent: str = "GelbooruCLI/1.0 (+https://github.com/example/gelbooru-cli)"
+    user_agent: str = "GelbooruCLI/1.0 (+https://github.com/joshuapieroway/gelbooru-downloader)"
     #: Gelbooru's CDN hotlink-protects original files: requests without a
     #: ``Referer`` are redirected to an HTML page instead of the image. This is
     #: only sent for gelbooru.com hosts, never to arbitrary mirrors.
@@ -421,7 +421,7 @@ def config_template() -> str:
 
     return """\
 # Gelbooru Downloader configuration
-# Docs: https://github.com/example/gelbooru-cli#configuration
+# Docs: https://github.com/joshuapieroway/gelbooru-downloader#configuration
 
 [general]
 # Where downloads are written (relative paths resolve against the current directory).
@@ -445,7 +445,7 @@ max_downloads_per_run = 0
 
 [network]
 base_url = "https://gelbooru.com"
-user_agent = "GelbooruCLI/1.0 (+https://github.com/example/gelbooru-cli)"
+user_agent = "GelbooruCLI/1.0 (+https://github.com/joshuapieroway/gelbooru-downloader)"
 # Gelbooru's CDN hotlink-protects original files and redirects requests without a
 # Referer to an HTML page. Sent for gelbooru.com hosts only; set to "" to disable.
 referer = "https://gelbooru.com/"
