@@ -44,12 +44,12 @@ def run_browse(app: Any, tags: str, requested: int, want_images: bool) -> None:
                 app.console.print(f"   [muted]{post.preview_url}[/]")
         app.console.print("")
         choices = []
-        if page > 0:
-            choices.append("p")
         if page < total_pages - 1:
-            choices.append("n")
-        choices.append("q")
-        prompt = "/".join(choices)
+            choices.append("next (n)")
+        if page > 0:
+            choices.append("prev (p)")
+        choices.append("quit (q)")
+        prompt = " / ".join(choices)
         try:
             raw = Prompt.ask(f"[brand]browse[/] ({prompt})", default="q", show_default=False)
         except (EOFError, KeyboardInterrupt):
