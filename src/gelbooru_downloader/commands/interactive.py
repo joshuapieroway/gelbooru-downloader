@@ -304,7 +304,7 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
         return
 
     posts = outcome.posts
-    page_size = 4
+    page_size = 3
     page = 0
     total_pages = max(1, -(-len(posts) // page_size))
     while True:
