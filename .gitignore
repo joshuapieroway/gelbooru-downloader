@@ -1,0 +1,43 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Application data (portable mode / local config)
+config.toml
+presets.json
+history.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Downloads
+downloads/
+*.part
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webm
+*.json.sidecar
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
