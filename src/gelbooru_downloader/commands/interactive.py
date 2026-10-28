@@ -6,10 +6,7 @@ non-interactive equivalent.
 
 from __future__ import annotations
 
-import base64
-import io
 import shlex
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -269,12 +266,14 @@ def _text_thumbnail(console: Any, url: str | None, *, width: int = 30) -> None:
 
 
 def _render_preview(console: Any, url: str | None, *, force_text: bool = False) -> None:
-    """Show a preview image inline (Kitty) or as a small text block."""
+    """Show a preview image inline (colored ASCII art) or as a text block."""
 
     if not url:
         return
     if not force_text and _supports_inline_images():
         try:
+            import io
+            import sys
             from urllib.parse import urlsplit
 
             import httpx
@@ -292,7 +291,6 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 console.print(f"   [muted](not an image: {content_type})[/]")
                 return
 
-            # Try to use Pillow to convert and send via kitty graphics protocol
             try:
                 from PIL import Image
             except ImportError:
@@ -309,31 +307,27 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 new_height = int(img.height * ratio)
                 img = img.resize((max_width, new_height))
 
-            # Convert to PNG
-            png_buffer = io.BytesIO()
-            img.save(png_buffer, format="PNG")
-            png_data = png_buffer.getvalue()
+            # Convert to RGB for ASCII art rendering
+            img_rgb = img.convert("RGB")
 
-            # Base64-encode the PNG data
-            b64_data = base64.b64encode(png_data).decode("ascii")
-
-            # Send via kitty graphics protocol
-            # Format: ESC_Ga=T,f=100,t=d;{base64_data}ESC\
-            # Chunk into 4096-byte pieces
-            chunk_size = 4096
-            chunks = [b64_data[i : i + chunk_size] for i in range(0, len(b64_data), chunk_size)]
+            # Render as colored ASCII art using terminal color codes
+            # This works in any terminal
+            chars = " .:-=+*#%@"
+            lines: list[str] = []
+            for y in range(img_rgb.height):
+                line = ""
+                for x in range(img_rgb.width):
+                    r, g, b = img_rgb.getpixel((x, y))
+                    brightness = (r * 299 + g * 587 + b * 114) // 1000
+                    char_idx = brightness * (len(chars) - 1) // 255
+                    char = chars[char_idx]
+                    # Use 24-bit color
+                    line += f"\x1b[38;2;{r};{g};{b}m{char}\x1b[0m"
+                lines.append(line)
 
             sys.stdout.flush()
-            if len(chunks) == 1:
-                sys.stdout.write(f"\x1b_Ga=T,f=100,t=d;{chunks[0]}\x1b\\")
-            else:
-                sys.stdout.write(f"\x1b_Ga=T,f=100,t=d,m=1;{chunks[0]}\x1b\\")
-                for i, chunk in enumerate(chunks[1:], 1):
-                    m = "1" if i < len(chunks) - 1 else "0"
-                    sys.stdout.write(f"\x1b_Gm={m};{chunk}\x1b\\")
-            sys.stdout.flush()
-            # Move to next line after image
-            sys.stdout.write("\n")
+            for line in lines:
+                sys.stdout.write(line + "\n")
             sys.stdout.flush()
             console.print()
         except Exception as exc:
