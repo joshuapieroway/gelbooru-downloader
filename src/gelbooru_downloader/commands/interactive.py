@@ -275,10 +275,15 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
         try:
             import subprocess
             import tempfile
+            from urllib.parse import urlsplit
 
             import httpx
 
-            response = httpx.get(url, timeout=15.0, follow_redirects=True)
+            host = (urlsplit(url).hostname or "").lower()
+            headers: dict[str, str] = {}
+            if host == "gelbooru.com" or host.endswith(".gelbooru.com"):
+                headers["Referer"] = "https://gelbooru.com/"
+            response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
             response.raise_for_status()
             content_type = (
                 (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
