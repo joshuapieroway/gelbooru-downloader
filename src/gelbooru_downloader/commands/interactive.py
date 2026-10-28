@@ -191,10 +191,39 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
 
     command_completer = WordCompleter(commands + preset_names, ignore_case=True)
 
-    # Merge completers: try tag completer first, then command completer
-    from prompt_toolkit.completion import merge_completers
+    # Use a single combined completer that shows tag suggestions for
+    # tag-like input and command suggestions for command-like input
+    from prompt_toolkit.completion import Completer
 
-    completer = merge_completers([tag_completer, command_completer])
+    class CombinedCompleter(Completer):
+        def get_completions(self, document: Document, complete_event: Any) -> Any:
+            text = document.text_before_cursor.lstrip()
+            if not text:
+                return
+            first_word = text.split()[0].lower() if text.split() else ""
+            # Check if input matches a known command prefix
+            matching_commands = [
+                c for c in commands + preset_names if c.lower().startswith(first_word)
+            ]
+            if matching_commands and len(text.split()) == 1:
+                # Show command suggestions if the input is a prefix of a command
+                yield from command_completer.get_completions(document, complete_event)
+                # Also show tag suggestions
+                tag_results = list(tag_completer.get_completions(document, complete_event))
+                if tag_results:
+                    yield from tag_results
+            elif len(text.split()) == 1 and len(first_word) >= 2:
+                # Single word, 2+ chars: try tag suggestions
+                tag_results = list(tag_completer.get_completions(document, complete_event))
+                if tag_results:
+                    yield from tag_results
+                else:
+                    yield from command_completer.get_completions(document, complete_event)
+            else:
+                # Multi-word input: use command completer
+                yield from command_completer.get_completions(document, complete_event)
+
+    completer = CombinedCompleter()
 
     # Custom style for the prompt
     style = Style.from_dict(
