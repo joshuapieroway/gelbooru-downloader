@@ -315,7 +315,9 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                     err = result.stderr.decode("utf-8", "replace").strip()
                     console.print(f"   [muted](icat failed: {err})[/]")
                 else:
-                    # Write the image escape sequences to the terminal
+                    # Flush any pending Rich output, then write the image
+                    # escape sequences directly to the terminal.
+                    sys.stdout.flush()
                     sys.stdout.buffer.write(result.stdout)
                     sys.stdout.flush()
                     console.print()
