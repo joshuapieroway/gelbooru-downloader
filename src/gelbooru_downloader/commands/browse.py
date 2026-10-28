@@ -12,7 +12,15 @@ from ._common import run_search
 from .interactive import _render_preview, _supports_inline_images
 
 
-def run_browse(app: Any, tags: str, requested: int, want_images: bool) -> None:
+def run_browse(
+    app: Any,
+    tags: str,
+    requested: int,
+    want_images: bool,
+    *,
+    ratings: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> None:
     """Fetch ``tags`` and page through the results with thumbnails and titles."""
 
     with app.console.status(f"[brand]searching {tags}…", spinner="dots"):
@@ -20,6 +28,8 @@ def run_browse(app: Any, tags: str, requested: int, want_images: bool) -> None:
             app,
             tags=tags,
             limit=requested,
+            ratings=ratings,
+            exclude=exclude,
             page_size=app.config.general.page_size,
         )
     if not outcome.posts:
@@ -39,7 +49,7 @@ def run_browse(app: Any, tags: str, requested: int, want_images: bool) -> None:
                 f"{post.width or '?'}×{post.height or '?'}  {post.summary(4)}"
             )
             if want_images:
-                _render_preview(post.preview_url or post.file_url)
+                _render_preview(app.console, post.preview_url or post.file_url)
             elif post.preview_url:
                 app.console.print(f"   [muted]{post.preview_url}[/]")
         app.console.print("")
@@ -77,6 +87,18 @@ def browse(
     images: Annotated[
         bool, typer.Option("--images", help="Render preview images inline (Kitty terminals).")
     ] = False,
+    rating: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--rating",
+            "-r",
+            help="Filter by rating (safe, general, questionable, sensitive, explicit, unrated).",
+        ),
+    ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", "-x", help="Exclude tags (comma separated, e.g. muscular,buff)."),
+    ] = None,
 ) -> None:
     """Browse search results as a paged list with thumbnails and titles."""
 
@@ -85,4 +107,4 @@ def browse(
     app = get_context(ctx)
     app.banner("browse")
     want_images = images or _supports_inline_images()
-    run_browse(app, tags, (limit or None), want_images)
+    run_browse(app, tags, (limit or None), want_images, ratings=rating, exclude=exclude)

@@ -224,21 +224,23 @@ def _supports_inline_images() -> bool:
     return bool(os.environ.get("KITTY_WINDOW_ID")) or "kitty" in os.environ.get("TERM", "")
 
 
-def _render_preview(url: str | None) -> None:
+def _text_thumbnail(console: Any, url: str | None, *, width: int = 30) -> None:
+    """Render a tiny ASCII/Unicode preview via chafa or viu if available.
+
+    Falls back gracefully (no output) when neither tool is installed or the
+    terminal cannot render images. This keeps ``browse`` usable everywhere
+    instead of silently showing nothing on non-Kitty terminals.
+    """
+
     if not url:
         return
-    if not _supports_inline_images():
-        return
     try:
-        import subprocess
-        import tempfile
+        from urllib.parse import urlsplit
 
         import httpx
 
-        headers = {}
-        from urllib.parse import urlsplit
-
         host = (urlsplit(url).hostname or "").lower()
+        headers: dict[str, str] = {}
         if host == "gelbooru.com" or host.endswith(".gelbooru.com"):
             headers["Referer"] = "https://gelbooru.com/"
         response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
@@ -246,29 +248,69 @@ def _render_preview(url: str | None) -> None:
         content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
         if not content_type.startswith("image/"):
             return
-        suffix = ".png"
-        lowered = url.lower().split("?", 1)[0]
-        for ext in (".jpg", ".jpeg", ".webp", ".gif"):
-            if lowered.endswith(ext):
-                suffix = ext
-                break
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-            handle.write(response.content)
-            path = handle.name
-        try:
-            subprocess.run(  # noqa: S603
-                ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
+
+        for tool in ("chafa", "viu"):
+            import subprocess
+
+            result = subprocess.run(  # noqa: S603
+                [tool, "--size", f"{width}", "-"],
                 check=False,
-                stdout=None,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
             )
-        finally:
-            import contextlib
-            from pathlib import Path
-
-            with contextlib.suppress(OSError):
-                Path(path).unlink(missing_ok=True)
+            if result.returncode == 0:
+                console.print(f"[muted]{result.stdout.decode('utf-8', 'replace')}[/]", end="")
+                return
+        return
     except Exception:
+        return
+
+
+def _render_preview(console: Any, url: str | None, *, force_text: bool = False) -> None:
+    """Show a preview image inline (Kitty) or as a small text block."""
+
+    if not url:
+        return
+    if not force_text and _supports_inline_images():
+        try:
+            import subprocess
+            import tempfile
+
+            import httpx
+
+            response = httpx.get(url, timeout=15.0, follow_redirects=True)
+            response.raise_for_status()
+            content_type = (
+                (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            )
+            if not content_type.startswith("image/"):
+                return
+            suffix = ".png"
+            lowered = url.lower().split("?", 1)[0]
+            for ext in (".jpg", ".jpeg", ".webp", ".gif"):
+                if lowered.endswith(ext):
+                    suffix = ext
+                    break
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+                handle.write(response.content)
+                path = handle.name
+            try:
+                subprocess.run(  # noqa: S603
+                    ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
+                    check=False,
+                    stdout=None,
+                    stderr=subprocess.DEVNULL,
+                )
+            finally:
+                import contextlib
+                from pathlib import Path
+
+                with contextlib.suppress(OSError):
+                    Path(path).unlink(missing_ok=True)
+        except Exception:
+            return
+    else:
+        _text_thumbnail(console, url)
         return
 
 
@@ -316,17 +358,17 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
                 f"{post.width or '?'}×{post.height or '?'}  {post.summary(4)}"
             )
             if want_images:
-                _render_preview(post.preview_url or post.file_url)
+                _render_preview(app.console, post.preview_url or post.file_url)
             elif post.preview_url:
                 app.console.print(f"   [muted]{post.preview_url}[/]")
         app.console.print("")
         choices = []
-        if page > 0:
-            choices.append("p")
         if page < total_pages - 1:
-            choices.append("n")
-        choices.append("q")
-        prompt = "/".join(choices)
+            choices.append("next (n)")
+        if page > 0:
+            choices.append("prev (p)")
+        choices.append("quit (q)")
+        prompt = " / ".join(choices)
         try:
             raw = Prompt.ask(f"[brand]browse[/] ({prompt})", default="q", show_default=False)
         except (EOFError, KeyboardInterrupt):

@@ -60,6 +60,9 @@ GELBOORU_THEME = Theme(
         "rating_explicit": "red",
         "rating_unrated": "grey58",
         "rating_general": "#7cc4ff",
+        "success": "bold green",
+        "error": "bold red",
+        "accent": "bold #ff6ec7",
     }
 )
 

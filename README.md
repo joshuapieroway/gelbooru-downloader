@@ -35,6 +35,8 @@ config file (see `gelbooru config`).
 ```bash
 gelbooru search "blue_hair solo" --limit 20
 gelbooru download "landscape" --limit 50 --output ./downloads/landscape
+gelbooru browse "blue_hair solo" -n 12 --images
+gelbooru export "blue_hair solo" json results.json
 gelbooru post info 1234567
 gelbooru presets add anime "blue_hair solo"
 gelbooru presets download anime
@@ -46,6 +48,8 @@ gelbooru presets download anime
 |---|---|
 | `search TAGS` | Search and render/export results |
 | `download TAGS` | Search and download matching posts |
+| `browse TAGS` | Paged thumbnail view with titles and navigation |
+| `export TAGS FORMAT FILE` | Export search results to JSON or CSV |
 | `post info ID` / `post download ID...` | Inspect or fetch individual posts |
 | `presets ...` | Save and reuse tag searches |
 | `batch TAGS_FILE` | Run many searches from a file |

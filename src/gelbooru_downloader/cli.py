@@ -26,6 +26,7 @@ from .commands import batch as batch_commands
 from .commands import browse as browse_commands
 from .commands import config_cmd
 from .commands import download as download_commands
+from .commands import export as export_commands
 from .commands import interactive as interactive_commands
 from .commands import post as post_commands
 from .commands import presets as preset_commands
@@ -214,6 +215,9 @@ app.command("download", help="Search for posts and download them.")(
 app.command("batch", help="Run many searches from a file.")(command_guard(batch_commands.batch))
 app.command("browse", help="Browse search results as a paged list with thumbnails.")(
     command_guard(browse_commands.browse)
+)
+app.command("export", help="Export search results to JSON or CSV.")(
+    command_guard(export_commands.export)
 )
 app.command("watch", help="Repeat a search on an interval and fetch new posts.")(
     command_guard(batch_commands.watch)
