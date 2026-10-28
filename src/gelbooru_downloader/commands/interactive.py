@@ -274,6 +274,7 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
     if not force_text and _supports_inline_images():
         try:
             import subprocess
+            import sys
             import tempfile
             from urllib.parse import urlsplit
 
@@ -301,9 +302,6 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 handle.write(response.content)
                 path = handle.name
             try:
-                import subprocess
-                import sys
-
                 # Run kitty icat and capture its output (which contains the
                 # terminal escape sequences for the image), then write them
                 # directly to stdout so they reach the terminal.
