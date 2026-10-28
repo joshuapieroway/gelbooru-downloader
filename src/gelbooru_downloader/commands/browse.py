@@ -9,7 +9,7 @@ from rich.prompt import Prompt
 
 from ..console import _rating_text, warn
 from ._common import run_search
-from .interactive import _render_preview, _supports_inline_images
+from .interactive import _render_preview
 
 
 def run_browse(
@@ -84,9 +84,6 @@ def browse(
     limit: Annotated[
         int, typer.Option("--limit", "-n", min=0, help="Maximum number of posts (0 = no limit).")
     ] = 50,
-    images: Annotated[
-        bool, typer.Option("--images", help="Render preview images inline (Kitty terminals).")
-    ] = False,
     rating: Annotated[
         list[str] | None,
         typer.Option(
@@ -106,5 +103,5 @@ def browse(
 
     app = get_context(ctx)
     app.banner("browse")
-    want_images = images or _supports_inline_images()
+    want_images = True
     run_browse(app, tags, (limit or None), want_images, ratings=rating, exclude=exclude)

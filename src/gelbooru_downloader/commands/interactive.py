@@ -341,20 +341,19 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
     known = {
         "-n": "limit",
         "--limit": "limit",
-        "--images": "flag",
     }
     parsed, positional, unknown = _parse_flags(args, known)
     _flag_help(app, unknown)
     tags = " ".join(positional)
     if not tags:
-        warn(app.console, "usage: browse <tags> [-n 25] [--images]")
+        warn(app.console, "usage: browse <tags> [-n 25]")
         return
     try:
         requested = int(parsed.get("limit") or limit)
     except ValueError:
         warn(app.console, "-n/--limit must be a number")
         return
-    want_images = "images" in parsed.get("_flags", []) or _supports_inline_images()
+    want_images = True
 
     with app.console.status(f"[brand]searching {tags}…", spinner="dots"):
         outcome = run_search(
