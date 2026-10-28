@@ -9,13 +9,15 @@ from __future__ import annotations
 import base64
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
@@ -59,6 +61,90 @@ Example: [muted]download blue_hair solo -n 20 -o ./downloads/blue[/]
 """
 
 
+class TagCompleter(Completer):
+    """Fetch tag suggestions from the Gelbooru API as the user types."""
+
+    def __init__(self, app: AppContext) -> None:
+        self.app = app
+        self._cache: dict[str, tuple[float, list[str]]] = {}
+        self._cache_ttl = 10.0
+
+    def get_completions(self, document: Document, complete_event: Any) -> Any:  # noqa: ARG002
+        text = document.text_before_cursor
+        parts = text.split()
+        if not parts:
+            return
+        prefix = parts[-1].lower().lstrip("-!")
+        if len(prefix) < 2:
+            return
+
+        now = time.time()
+        cached = self._cache.get(prefix)
+        if cached and now - cached[0] < self._cache_ttl:
+            tags = cached[1]
+        else:
+            tags = self._fetch_tags(prefix)
+            self._cache[prefix] = (now, tags)
+
+        start_pos = -(len(parts[-1]))
+
+        for tag in tags:
+            yield Completion(tag, start_position=start_pos, display=tag)
+
+    def _fetch_tags(self, prefix: str) -> list[str]:
+        try:
+            import httpx
+
+            network = self.app.config.network
+            params: dict[str, str] = {
+                "page": "dapi",
+                "s": "tag",
+                "q": "index",
+                "name_pattern": prefix + "%",
+                "limit": "10",
+                "order": "count",
+            }
+            if network.response_format != "xml":
+                params["json"] = "1"
+            if network.auth_mode == "params" and network.has_credentials:
+                params["user_id"] = str(network.user_id)
+                params["api_key"] = str(network.api_key)
+
+            from urllib.parse import urlencode, urlsplit, urlunsplit
+
+            url_parts = urlsplit(network.base_url)
+            path = url_parts.path.rstrip("/") + "/index.php"
+            url = urlunsplit((url_parts.scheme, url_parts.netloc, path, urlencode(params), ""))
+
+            headers = {"User-Agent": network.user_agent}
+            if network.auth_mode == "basic" and network.has_credentials:
+                import base64
+
+                token = base64.b64encode(f"{network.user_id}:{network.api_key}".encode()).decode()
+                headers["Authorization"] = f"Basic {token}"
+
+            with httpx.Client(timeout=5.0) as client:
+                response = client.get(url, headers=headers)
+                if response.status_code != 200:
+                    return []
+                data = response.json()
+                tags = []
+                tag_list = data.get("tag", [])
+                if isinstance(tag_list, dict):
+                    tag_list = [tag_list]
+                for tag in tag_list:
+                    name = tag.get("name", "")
+                    count = tag.get("count", 0)
+                    if name and name.lower().startswith(prefix.lower()):
+                        label = f"{name}  ({count})" if count else name
+                        tags.append((name, count, label))
+                # Sort by count descending
+                tags.sort(key=lambda t: t[1], reverse=True)
+                return [t[2] for t in tags[:10]]
+        except Exception:
+            return []
+
+
 def run_interactive(app: AppContext, *, output: Path | None = None, limit: int = 25) -> int:
     """Run the REPL loop; returns the process exit code."""
 
@@ -72,7 +158,7 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
         "[muted]Type any tags to browse, or a command (search, download, info, ...).[/]"
     )
 
-    # Build completer with commands and preset names
+    # Build completer with tag suggestions from the Gelbooru API
     commands = [
         "search",
         "find",
@@ -100,11 +186,15 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
         "q",
     ]
     preset_names = [p.name for p in app.presets]
-    completer = WordCompleter(
-        commands + preset_names,
-        ignore_case=True,
-        sentence=True,
-    )
+    tag_completer = TagCompleter(app)
+    from prompt_toolkit.completion import WordCompleter
+
+    command_completer = WordCompleter(commands + preset_names, ignore_case=True)
+
+    # Merge completers: try tag completer first, then command completer
+    from prompt_toolkit.completion import merge_completers
+
+    completer = merge_completers([tag_completer, command_completer])
 
     # Custom style for the prompt
     style = Style.from_dict(
