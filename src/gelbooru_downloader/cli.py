@@ -44,6 +44,8 @@ A fast terminal client for the Gelbooru image board.
 [bold]Typical use[/]
   [info]gelbooru search "blue_hair solo" --limit 100[/]
   [info]gelbooru download "landscape" --limit 50 --output ./downloads/landscape[/]
+  [info]gelbooru browse "blue_hair solo" -n 12 --images[/]
+  [info]gelbooru export "blue_hair solo" json results.json[/]
   [info]gelbooru post info 1234567[/]
   [info]gelbooru presets add anime "blue_hair solo"[/]
 
