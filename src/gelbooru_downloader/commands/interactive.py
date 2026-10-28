@@ -289,6 +289,7 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
             )
             if not content_type.startswith("image/"):
+                console.print(f"   [muted](not an image: {content_type})[/]")
                 return
             suffix = ".png"
             lowered = url.lower().split("?", 1)[0]
@@ -300,12 +301,18 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 handle.write(response.content)
                 path = handle.name
             try:
-                subprocess.run(  # noqa: S603
+                result = subprocess.run(  # noqa: S603
                     ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
                     check=False,
                     stdout=None,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                 )
+                if result.returncode != 0:
+                    err = result.stderr.decode("utf-8", "replace").strip()
+                    console.print(f"   [muted](icat failed: {err})[/]")
+                else:
+                    # Force a newline after the image so the next post starts on a new line
+                    console.print()
             finally:
                 import contextlib
                 from pathlib import Path
