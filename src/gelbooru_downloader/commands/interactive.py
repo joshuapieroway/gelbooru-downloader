@@ -392,6 +392,11 @@ def _cmd_search(app: AppContext, args: list[str], *, limit: int) -> None:
         )
     if not outcome.posts:
         warn(app.console, f"nothing matched '{tags}'")
+        tag_list = tags.split()
+        if len(tag_list) > 1:
+            app.console.print(
+                f"  [muted]hint: try searching tags individually: {', '.join(tag_list)}[/]"
+            )
         return
 
     app.console.print(
@@ -577,6 +582,12 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
         )
     if not outcome.posts:
         warn(app.console, f"nothing matched '{tags}'")
+        # Suggest trying individual tags
+        tag_list = tags.split()
+        if len(tag_list) > 1:
+            app.console.print(
+                f"  [muted]hint: try searching tags individually: {', '.join(tag_list)}[/]"
+            )
         return
 
     posts = outcome.posts
@@ -660,6 +671,11 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
         )
     if not outcome.posts:
         warn(app.console, f"nothing matched '{tags}'")
+        tag_list = tags.split()
+        if len(tag_list) > 1:
+            app.console.print(
+                f"  [muted]hint: try searching tags individually: {', '.join(tag_list)}[/]"
+            )
         return
     summary = run_async(
         download_posts(app, posts=outcome.posts, request=request, title="Downloading")
