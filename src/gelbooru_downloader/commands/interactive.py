@@ -75,7 +75,7 @@ class TagCompleter(Completer):
         if not parts:
             return
         prefix = parts[-1].lower().lstrip("-!")
-        if len(prefix) < 2:
+        if len(prefix) < 1:
             return
 
         now = time.time()
@@ -201,24 +201,18 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
             if not text:
                 return
             first_word = text.split()[0].lower() if text.split() else ""
-            # Check if input matches a known command prefix
-            matching_commands = [
-                c for c in commands + preset_names if c.lower().startswith(first_word)
-            ]
-            if matching_commands and len(text.split()) == 1:
-                # Show command suggestions if the input is a prefix of a command
-                yield from command_completer.get_completions(document, complete_event)
-                # Also show tag suggestions
+            if len(text.split()) == 1 and len(first_word) >= 1:
+                # Single word: show tag suggestions
                 tag_results = list(tag_completer.get_completions(document, complete_event))
                 if tag_results:
                     yield from tag_results
-            elif len(text.split()) == 1 and len(first_word) >= 2:
-                # Single word, 2+ chars: try tag suggestions
-                tag_results = list(tag_completer.get_completions(document, complete_event))
-                if tag_results:
-                    yield from tag_results
-                else:
-                    yield from command_completer.get_completions(document, complete_event)
+                # Show command suggestions only for 2+ char inputs matching a command
+                if len(first_word) >= 2:
+                    matching_cmds = [
+                        c for c in commands + preset_names if c.lower().startswith(first_word)
+                    ]
+                    if matching_cmds:
+                        yield from command_completer.get_completions(document, complete_event)
             else:
                 # Multi-word input: use command completer
                 yield from command_completer.get_completions(document, complete_event)
