@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
 from rich.prompt import Prompt
 
 from ..app import AppContext, get_context, run_async
@@ -37,7 +43,8 @@ from ._common import (
 __all__ = ["interactive_command", "run_interactive"]
 
 _HELP = """[bold]commands[/]
-  [info]search <tags> [-n 25][/]                search and show a result table
+  [info]<tags>[/]                              browse posts matching these tags (default)
+  [info]search <tags> [-n 25][/]               search and show a result table
   [info]download <tags> [-n 25] [-o DIR][/]    search and download the results
   [info]browse <tags> [-n 25][/]               paged list with thumbnails and titles
   [info]info <post_id>[/]                      show one post in detail
@@ -47,6 +54,7 @@ _HELP = """[bold]commands[/]
   [info]history[/]                             recent downloads
   [info]help[/], [info]quit[/]                 this text, or leave
 
+Example: [muted]blue_hair solo[/]              (browse by default)
 Example: [muted]download blue_hair solo -n 20 -o ./downloads/blue[/]
 """
 
@@ -59,15 +67,84 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
 
     if app.config.display.show_banner:
         app.console.print(banner(__version__, "interactive mode — type 'help' for commands"))
-    app.console.print("[muted]Ctrl+C or 'quit' to leave.[/]")
+    app.console.print("[muted]Ctrl+C or 'quit' to leave. Tab to autocomplete, ↑↓ for history.[/]")
+    app.console.print(
+        "[muted]Type any tags to browse, or a command (search, download, info, ...).[/]"
+    )
+
+    # Build completer with commands and preset names
+    commands = [
+        "search",
+        "find",
+        "s",
+        "download",
+        "dl",
+        "d",
+        "browse",
+        "br",
+        "b",
+        "info",
+        "show",
+        "post",
+        "get",
+        "fetch",
+        "export",
+        "presets",
+        "preset",
+        "history",
+        "hist",
+        "help",
+        "?",
+        "quit",
+        "exit",
+        "q",
+    ]
+    preset_names = [p.name for p in app.presets]
+    completer = WordCompleter(
+        commands + preset_names,
+        ignore_case=True,
+        sentence=True,
+    )
+
+    # Custom style for the prompt
+    style = Style.from_dict(
+        {
+            "prompt": "ansicyan bold",
+            "bottom-toolbar": "bg:#333333 #ffffff",
+        }
+    )
+
+    # Key bindings
+    kb = KeyBindings()
+
+    @kb.add("c-c")
+    def _(event: Any) -> None:
+        event.app.exit(exception=KeyboardInterrupt)
+
+    @kb.add("c-d")
+    def _(event: Any) -> None:
+        event.app.exit()
+
+    history = InMemoryHistory()
+
+    session = PromptSession(
+        history=history,
+        auto_suggest=AutoSuggestFromHistory(),
+        completer=completer,
+        style=style,
+        key_bindings=kb,
+        bottom_toolbar=lambda: (
+            "Type tags to browse | Commands: search download browse info export presets history | Tab=complete ↑↓=history"
+        ),
+    )
 
     while True:
         try:
-            raw = Prompt.ask("[brand]gelbooru[/]", default="help", show_default=False)
+            raw = session.prompt("gelbooru> ")
         except (EOFError, KeyboardInterrupt):
             app.console.print("\n[muted]bye[/]")
             return 0
-        except Exception:  # pragma: no cover - click raises Abort on Ctrl+C in some setups
+        except Exception:  # pragma: no cover
             app.console.print("\n[muted]bye[/]")
             return 0
 
@@ -121,8 +198,11 @@ def _dispatch(app: AppContext, line: str, *, output: Path | None, limit: int) ->
         from ..console import format_history_table
 
         app.console.print(format_history_table(app.history.history(limit=15)))
+    elif command in {"quit", "exit", "q"}:
+        raise EOFError
     else:
-        warn(app.console, f"unknown command {command!r} — type 'help'")
+        # Treat unknown input as a browse query (default action)
+        _cmd_browse(app, parts, limit=limit)
 
 
 def _parse_flags(

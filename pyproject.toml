@@ -29,6 +29,7 @@ dependencies = [
     "rich>=13.7",
     "pydantic>=2.7",
     "Pillow>=10.0",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.urls]
