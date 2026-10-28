@@ -302,25 +302,66 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 handle.write(response.content)
                 path = handle.name
             try:
-                # Run kitty icat and capture its output (which contains the
-                # terminal escape sequences for the image), then write them
-                # directly to stdout so they reach the terminal.
-                result = subprocess.run(  # noqa: S603
-                    ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
-                    check=False,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                )
-                if result.returncode != 0:
-                    err = result.stderr.decode("utf-8", "replace").strip()
-                    console.print(f"   [muted](icat failed: {err})[/]")
-                else:
-                    # Flush any pending Rich output, then write the image
-                    # escape sequences directly to the terminal.
-                    sys.stdout.flush()
-                    sys.stdout.buffer.write(result.stdout)
-                    sys.stdout.flush()
-                    console.print()
+                import os
+                import pty
+                import select
+
+                # kitty icat requires a controlling terminal. Allocate a PTY
+                # so the command can run and its escape sequences are captured.
+                master_fd, slave_fd = pty.openpty()
+                try:
+                    proc = subprocess.Popen(  # noqa: S603
+                        ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
+                        stdin=subprocess.DEVNULL,
+                        stdout=slave_fd,
+                        stderr=subprocess.PIPE,
+                    )
+                    os.close(slave_fd)
+                    slave_fd = -1
+
+                    # Read all output from the PTY
+                    output = b""
+                    while True:
+                        ready, _, _ = select.select([master_fd], [], [], 0.1)
+                        if ready:
+                            try:
+                                chunk = os.read(master_fd, 65536)
+                            except OSError:
+                                break
+                            if not chunk:
+                                break
+                            output += chunk
+                        if proc.poll() is not None:
+                            # Drain remaining
+                            try:
+                                while True:
+                                    chunk = os.read(master_fd, 65536)
+                                    if not chunk:
+                                        break
+                                    output += chunk
+                            except OSError:
+                                pass
+                            break
+
+                    proc.wait()
+                    if proc.returncode != 0:
+                        err = (
+                            proc.stderr.read().decode("utf-8", "replace").strip()
+                            if proc.stderr
+                            else ""
+                        )
+                        console.print(f"   [muted](icat failed: {err})[/]")
+                    elif output:
+                        sys.stdout.flush()
+                        sys.stdout.buffer.write(output)
+                        sys.stdout.flush()
+                        console.print()
+                    else:
+                        console.print("   [muted](icat produced no output)[/]")
+                finally:
+                    if slave_fd >= 0:
+                        os.close(slave_fd)
+                    os.close(master_fd)
             finally:
                 import contextlib
                 from pathlib import Path
