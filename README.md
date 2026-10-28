@@ -55,7 +55,7 @@ gelbooru presets download anime
 | `batch TAGS_FILE` | Run many searches from a file |
 | `watch TAGS` | Re-run a search on an interval |
 | `config ...` | Show/set config, history, paths |
-| `interactive` | Optional REPL |
+| `interactive` | Optional REPL with tab completion and hints |
 
 Run `gelbooru <command> --help` for options.
 
