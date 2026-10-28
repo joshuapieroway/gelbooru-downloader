@@ -101,8 +101,7 @@ class TagCompleter(Completer):
                 "s": "tag",
                 "q": "index",
                 "name_pattern": prefix + "%",
-                "limit": "10",
-                "order": "count",
+                "limit": "100",
             }
             if network.response_format != "xml":
                 params["json"] = "1"
