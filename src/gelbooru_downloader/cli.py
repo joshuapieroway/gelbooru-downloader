@@ -78,13 +78,15 @@ class _RedactFilter(logging.Filter):
 def configure_logging(verbose: int, quiet: bool, log_file: Path | None = None) -> None:
     """Set up console (and optional file) logging."""
 
-    level = logging.WARNING
+    level = logging.ERROR
     if verbose == 1:
+        level = logging.WARNING
+    elif verbose == 2:
         level = logging.INFO
-    elif verbose >= 2:
+    elif verbose >= 3:
         level = logging.DEBUG
     if quiet:
-        level = logging.ERROR
+        level = logging.CRITICAL + 1
 
     console = Console(stderr=True)
     handlers: list[logging.Handler] = [
@@ -169,7 +171,12 @@ def main_callback(
     ] = False,
     verbose: Annotated[
         int,
-        typer.Option("--verbose", "-v", count=True, help="Increase logging (-v info, -vv debug)."),
+        typer.Option(
+            "--verbose",
+            "-v",
+            count=True,
+            help="Increase logging (-v warnings, -vv info, -vvv debug).",
+        ),
     ] = 0,
     log_file: Annotated[
         Path | None,
