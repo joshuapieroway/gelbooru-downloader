@@ -6,7 +6,10 @@ non-interactive equivalent.
 
 from __future__ import annotations
 
+import base64
+import io
 import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -90,7 +93,6 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
 
 def _dispatch(app: AppContext, line: str, *, output: Path | None, limit: int) -> None:
     """Parse and execute one REPL line."""
-
     try:
         parts = shlex.split(line)
     except ValueError as exc:
@@ -273,9 +275,6 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
         return
     if not force_text and _supports_inline_images():
         try:
-            import subprocess
-            import sys
-            import tempfile
             from urllib.parse import urlsplit
 
             import httpx
@@ -292,91 +291,59 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
             if not content_type.startswith("image/"):
                 console.print(f"   [muted](not an image: {content_type})[/]")
                 return
-            suffix = ".png"
-            lowered = url.lower().split("?", 1)[0]
-            for ext in (".jpg", ".jpeg", ".webp", ".gif"):
-                if lowered.endswith(ext):
-                    suffix = ext
-                    break
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-                handle.write(response.content)
-                path = handle.name
+
+            # Try to use Pillow to convert and send via kitty graphics protocol
             try:
-                import os
-                import pty
-                import select
+                from PIL import Image
+            except ImportError:
+                console.print(
+                    "   [muted](Pillow not installed; install with pip install Pillow)[/]"
+                )
+                return
 
-                # kitty icat requires a controlling terminal. Allocate a PTY
-                # so the command can run and its escape sequences are captured.
-                master_fd, slave_fd = pty.openpty()
-                try:
-                    proc = subprocess.Popen(  # noqa: S603
-                        ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
-                        stdin=subprocess.DEVNULL,
-                        stdout=slave_fd,
-                        stderr=subprocess.PIPE,
-                    )
-                    os.close(slave_fd)
-                    slave_fd = -1
+            img = Image.open(io.BytesIO(response.content))
+            # Resize to a reasonable width for terminal display
+            max_width = 40
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((max_width, new_height))
 
-                    # Read all output from the PTY
-                    output = b""
-                    while True:
-                        ready, _, _ = select.select([master_fd], [], [], 0.1)
-                        if ready:
-                            try:
-                                chunk = os.read(master_fd, 65536)
-                            except OSError:
-                                break
-                            if not chunk:
-                                break
-                            output += chunk
-                        if proc.poll() is not None:
-                            # Drain remaining
-                            try:
-                                while True:
-                                    chunk = os.read(master_fd, 65536)
-                                    if not chunk:
-                                        break
-                                    output += chunk
-                            except OSError:
-                                pass
-                            break
+            # Convert to PNG
+            png_buffer = io.BytesIO()
+            img.save(png_buffer, format="PNG")
+            png_data = png_buffer.getvalue()
 
-                    proc.wait()
-                    if proc.returncode != 0:
-                        err = (
-                            proc.stderr.read().decode("utf-8", "replace").strip()
-                            if proc.stderr
-                            else ""
-                        )
-                        console.print(f"   [muted](icat failed: {err})[/]")
-                    elif output:
-                        sys.stdout.flush()
-                        sys.stdout.buffer.write(output)
-                        sys.stdout.flush()
-                        console.print()
-                    else:
-                        console.print("   [muted](icat produced no output)[/]")
-                finally:
-                    if slave_fd >= 0:
-                        os.close(slave_fd)
-                    os.close(master_fd)
-            finally:
-                import contextlib
-                from pathlib import Path
+            # Base64-encode the PNG data
+            b64_data = base64.b64encode(png_data).decode("ascii")
 
-                with contextlib.suppress(OSError):
-                    Path(path).unlink(missing_ok=True)
-        except Exception:
-            return
+            # Send via kitty graphics protocol
+            # Format: ESC_Ga=T,f=100,t=d;{base64_data}ESC\
+            # Chunk into 4096-byte pieces
+            chunk_size = 4096
+            chunks = [b64_data[i : i + chunk_size] for i in range(0, len(b64_data), chunk_size)]
+
+            sys.stdout.flush()
+            if len(chunks) == 1:
+                sys.stdout.write(f"\x1b_Ga=T,f=100,t=d;{chunks[0]}\x1b\\")
+            else:
+                sys.stdout.write(f"\x1b_Ga=T,f=100,t=d,m=1;{chunks[0]}\x1b\\")
+                for i, chunk in enumerate(chunks[1:], 1):
+                    m = "1" if i < len(chunks) - 1 else "0"
+                    sys.stdout.write(f"\x1b_Gm={m};{chunk}\x1b\\")
+            sys.stdout.flush()
+            # Move to next line after image
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            console.print()
+        except Exception as exc:
+            console.print(f"   [muted](image render failed: {exc})[/]")
     else:
         _text_thumbnail(console, url)
         return
 
 
 def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
-
     known = {
         "-n": "limit",
         "--limit": "limit",
@@ -488,7 +455,9 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
     if not outcome.posts:
         warn(app.console, f"nothing matched '{tags}'")
         return
-    summary = run_async(download_posts(app, outcome.posts, request, title="Downloading"))
+    summary = run_async(
+        download_posts(app, posts=outcome.posts, request=request, title="Downloading")
+    )
     print_summary(app.console, summary, output_dir=download_options(app, request).output_dir)
 
 
@@ -586,7 +555,6 @@ def interactive_command(
     limit: int = 25,
 ) -> None:
     """Start an interactive session (search, inspect and download without typing full commands)."""
-
     app = get_context(ctx)
     app.banner("interactive")
     raise typer.Exit(run_interactive(app, output=output, limit=limit))
