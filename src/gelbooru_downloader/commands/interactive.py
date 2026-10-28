@@ -301,22 +301,26 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 handle.write(response.content)
                 path = handle.name
             try:
+                import subprocess
                 import sys
 
+                # Run kitty icat and capture its output (which contains the
+                # terminal escape sequences for the image), then write them
+                # directly to stdout so they reach the terminal.
                 result = subprocess.run(  # noqa: S603
                     ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
                     check=False,
                     stdin=subprocess.DEVNULL,
-                    stdout=sys.stdout,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
                 )
                 if result.returncode != 0:
                     err = result.stderr.decode("utf-8", "replace").strip()
                     console.print(f"   [muted](icat failed: {err})[/]")
                 else:
-                    # Force a newline after the image so the next post starts on a new line
-                    console.print()
+                    # Write the image escape sequences to the terminal
+                    sys.stdout.buffer.write(result.stdout)
                     sys.stdout.flush()
+                    console.print()
             finally:
                 import contextlib
                 from pathlib import Path
