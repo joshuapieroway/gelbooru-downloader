@@ -303,7 +303,7 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
 
             img = Image.open(io.BytesIO(response.content))
             # Resize to a reasonable width for terminal display
-            max_width = 40
+            max_width = 60
             if img.width > max_width:
                 ratio = max_width / img.width
                 new_height = int(img.height * ratio)
