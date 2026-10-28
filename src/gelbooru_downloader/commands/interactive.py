@@ -6,7 +6,9 @@ non-interactive equivalent.
 
 from __future__ import annotations
 
+import base64
 import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +39,7 @@ __all__ = ["interactive_command", "run_interactive"]
 _HELP = """[bold]commands[/]
   [info]search <tags> [-n 25][/]                search and show a result table
   [info]download <tags> [-n 25] [-o DIR][/]    search and download the results
-  [info]browse <tags> [-n 25] [--images][/]    paged list with thumbnails and titles
+  [info]browse <tags> [-n 25][/]               paged list with thumbnails and titles
   [info]info <post_id>[/]                      show one post in detail
   [info]dl <post_id...[/]                      download specific posts
   [info]export <tags> <json|csv> <file>[/]     save search results to a file
@@ -266,14 +268,13 @@ def _text_thumbnail(console: Any, url: str | None, *, width: int = 30) -> None:
 
 
 def _render_preview(console: Any, url: str | None, *, force_text: bool = False) -> None:
-    """Show a preview image inline (colored ASCII art) or as a text block."""
+    """Show a preview image using the kitty graphics protocol."""
 
     if not url:
         return
     if not force_text and _supports_inline_images():
         try:
             import io
-            import sys
             from urllib.parse import urlsplit
 
             import httpx
@@ -294,40 +295,41 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
             try:
                 from PIL import Image
             except ImportError:
-                console.print(
-                    "   [muted](Pillow not installed; install with pip install Pillow)[/]"
-                )
+                console.print("   [muted](Pillow not installed)[/]")
                 return
 
             img = Image.open(io.BytesIO(response.content))
             # Resize to a reasonable width for terminal display
-            max_width = 60
+            max_width = 80
             if img.width > max_width:
                 ratio = max_width / img.width
                 new_height = int(img.height * ratio)
                 img = img.resize((max_width, new_height))
 
-            # Convert to RGB for ASCII art rendering
-            img_rgb = img.convert("RGB")
+            # Convert to PNG
+            png_buffer = io.BytesIO()
+            img.save(png_buffer, format="PNG")
+            png_data = png_buffer.getvalue()
 
-            # Render as colored ASCII art using terminal color codes
-            # This works in any terminal
-            chars = " .:-=+*#%@"
-            lines: list[str] = []
-            for y in range(img_rgb.height):
-                line = ""
-                for x in range(img_rgb.width):
-                    r, g, b = img_rgb.getpixel((x, y))
-                    brightness = (r * 299 + g * 587 + b * 114) // 1000
-                    char_idx = brightness * (len(chars) - 1) // 255
-                    char = chars[char_idx]
-                    # Use 24-bit color
-                    line += f"\x1b[38;2;{r};{g};{b}m{char}\x1b[0m"
-                lines.append(line)
+            # Base64-encode the PNG data
+            b64_data = base64.b64encode(png_data).decode("ascii")
+
+            # Send via kitty graphics protocol
+            # Format: ESC_Ga=T,f=100,t=d;{base64_data}ESC\
+            chunk_size = 4096
+            chunks = [b64_data[i : i + chunk_size] for i in range(0, len(b64_data), chunk_size)]
 
             sys.stdout.flush()
-            for line in lines:
-                sys.stdout.write(line + "\n")
+            if len(chunks) == 1:
+                sys.stdout.write(f"\x1b_Ga=T,f=100,t=d;{chunks[0]}\x1b\\")
+            else:
+                sys.stdout.write(f"\x1b_Ga=T,f=100,t=d,m=1;{chunks[0]}\x1b\\")
+                for i, chunk in enumerate(chunks[1:], 1):
+                    m = "1" if i < len(chunks) - 1 else "0"
+                    sys.stdout.write(f"\x1b_Gm={m};{chunk}\x1b\\")
+            sys.stdout.flush()
+            # Move to next line after image
+            sys.stdout.write("\n")
             sys.stdout.flush()
             console.print()
         except Exception as exc:
