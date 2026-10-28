@@ -88,8 +88,8 @@ class TagCompleter(Completer):
 
         start_pos = -(len(parts[-1]))
 
-        for tag in tags:
-            yield Completion(tag, start_position=start_pos, display=tag)
+        for name, label in tags:
+            yield Completion(name, start_position=start_pos, display=label)
 
     def _fetch_tags(self, prefix: str) -> list[str]:
         try:
@@ -140,7 +140,7 @@ class TagCompleter(Completer):
                         tags.append((name, count, label))
                 # Sort by count descending
                 tags.sort(key=lambda t: t[1], reverse=True)
-                return [t[2] for t in tags[:10]]
+                return [(t[0], t[2]) for t in tags[:10]]
         except Exception:
             return []
 
