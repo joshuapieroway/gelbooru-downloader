@@ -301,10 +301,13 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 handle.write(response.content)
                 path = handle.name
             try:
+                import sys
+
                 result = subprocess.run(  # noqa: S603
                     ["kitty", "+kitten", "icat", "--align", "left", path],  # noqa: S607
                     check=False,
-                    stdout=None,
+                    stdin=subprocess.DEVNULL,
+                    stdout=sys.stdout,
                     stderr=subprocess.PIPE,
                 )
                 if result.returncode != 0:
@@ -313,6 +316,7 @@ def _render_preview(console: Any, url: str | None, *, force_text: bool = False) 
                 else:
                     # Force a newline after the image so the next post starts on a new line
                     console.print()
+                    sys.stdout.flush()
             finally:
                 import contextlib
                 from pathlib import Path
