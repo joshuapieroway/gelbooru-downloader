@@ -66,8 +66,9 @@ class TagCompleter(Completer):
 
     def __init__(self, app: AppContext) -> None:
         self.app = app
-        self._cache: dict[str, tuple[float, list[str]]] = {}
-        self._cache_ttl = 10.0
+        self._cache: dict[str, list[tuple[str, int, str]]] = {}
+        self._cache_ttl = 300.0  # 5 minutes
+        self._cache_times: dict[str, float] = {}
 
     def get_completions(self, document: Document, complete_event: Any) -> Any:  # noqa: ARG002
         text = document.text_before_cursor
@@ -80,41 +81,46 @@ class TagCompleter(Completer):
 
         now = time.time()
         cached = self._cache.get(prefix)
-        if cached and now - cached[0] < self._cache_ttl:
-            tags = cached[1]
+        if cached is not None and now - self._cache_times.get(prefix, 0) < self._cache_ttl:
+            tags = cached
+            # cached is list[tuple[str, int, str]] (name, count, label) - all tags
+            # Return top 10 by count
+            tags_sorted = sorted(tags, key=lambda t: t[1], reverse=True)
+            top = tags_sorted[:10]
         else:
             tags = self._fetch_tags(prefix)
-            self._cache[prefix] = (now, tags)
+            # _fetch_tags returns list[tuple[str, int, str]] (name, count, label)
+            self._cache[prefix] = tags
+            self._cache_times[prefix] = now
+            tags_sorted = sorted(tags, key=lambda t: t[1], reverse=True)
+            top = tags_sorted[:10]
 
         start_pos = -(len(parts[-1]))
 
-        for name, label in tags:
+        for item in top:
+            if isinstance(item, tuple) and len(item) >= 2:
+                name = item[0]
+                label = item[-1]
+            else:
+                name = str(item)
+                label = name
             yield Completion(name, start_position=start_pos, display=label)
 
-    def _fetch_tags(self, prefix: str) -> list[str]:
+    def _fetch_tags(self, prefix: str) -> list[tuple[str, str]]:
+        import time
+
+        # Check cache for this exact prefix
+        now = time.time()
+        if prefix in self._cache and now - self._cache_times.get(prefix, 0) < self._cache_ttl:
+            tags = self._cache[prefix]
+            tags.sort(key=lambda t: t[1], reverse=True)
+            return [(t[0], t[1], t[2]) for t in tags[:10]]
+
+        # Fetch all tags for this prefix from the API
         try:
             import httpx
 
             network = self.app.config.network
-            params: dict[str, str] = {
-                "page": "dapi",
-                "s": "tag",
-                "q": "index",
-                "name_pattern": prefix + "%",
-                "limit": "100",
-            }
-            if network.response_format != "xml":
-                params["json"] = "1"
-            if network.auth_mode == "params" and network.has_credentials:
-                params["user_id"] = str(network.user_id)
-                params["api_key"] = str(network.api_key)
-
-            from urllib.parse import urlencode, urlsplit, urlunsplit
-
-            url_parts = urlsplit(network.base_url)
-            path = url_parts.path.rstrip("/") + "/index.php"
-            url = urlunsplit((url_parts.scheme, url_parts.netloc, path, urlencode(params), ""))
-
             headers = {"User-Agent": network.user_agent}
             if network.auth_mode == "basic" and network.has_credentials:
                 import base64
@@ -122,24 +128,60 @@ class TagCompleter(Completer):
                 token = base64.b64encode(f"{network.user_id}:{network.api_key}".encode()).decode()
                 headers["Authorization"] = f"Basic {token}"
 
-            with httpx.Client(timeout=5.0) as client:
-                response = client.get(url, headers=headers)
-                if response.status_code != 200:
-                    return []
-                data = response.json()
-                tags = []
-                tag_list = data.get("tag", [])
-                if isinstance(tag_list, dict):
-                    tag_list = [tag_list]
-                for tag in tag_list:
-                    name = tag.get("name", "")
-                    count = tag.get("count", 0)
-                    if name and name.lower().startswith(prefix.lower()):
-                        label = f"{name}  ({count})" if count else name
-                        tags.append((name, count, label))
-                # Sort by count descending
-                tags.sort(key=lambda t: t[1], reverse=True)
-                return [(t[0], t[2]) for t in tags[:10]]
+            from urllib.parse import urlencode, urlsplit, urlunsplit
+
+            url_parts = urlsplit(network.base_url)
+            path = url_parts.path.rstrip("/") + "/index.php"
+
+            all_tags: list[dict] = []
+            offset = 0
+            page_size = 100
+            max_pages = 1 if len(prefix) <= 1 else 50
+            with httpx.Client(timeout=15.0) as client:
+                for _ in range(max_pages):
+                    params: dict[str, str] = {
+                        "page": "dapi",
+                        "s": "tag",
+                        "q": "index",
+                        "name_pattern": prefix + "%",
+                        "limit": str(page_size),
+                        "pid": str(offset // page_size),
+                    }
+                    if network.response_format != "xml":
+                        params["json"] = "1"
+                    if network.auth_mode == "params" and network.has_credentials:
+                        params["user_id"] = str(network.user_id)
+                        params["api_key"] = str(network.api_key)
+
+                    url = urlunsplit(
+                        (url_parts.scheme, url_parts.netloc, path, urlencode(params), "")
+                    )
+                    response = client.get(url, headers=headers)
+                    if response.status_code != 200:
+                        break
+                    data = response.json()
+                    tag_list = data.get("tag", [])
+                    if isinstance(tag_list, dict):
+                        tag_list = [tag_list]
+                    if not tag_list:
+                        break
+                    all_tags.extend(tag_list)
+                    total = data.get("@attributes", {}).get("count", 0)
+                    offset += len(tag_list)
+                    if offset >= total or len(tag_list) < page_size:
+                        break
+
+            tags = []
+            for tag in all_tags:
+                name = tag.get("name", "")
+                count = tag.get("count", 0)
+                if name and name.lower().startswith(prefix.lower()):
+                    label = f"{name}  ({count})" if count else name
+                    tags.append((name, count, label))
+            self._cache[prefix] = tags
+            self._cache_times[prefix] = now
+            tags.sort(key=lambda t: t[1], reverse=True)
+            return [(t[0], t[1], t[2]) for t in tags]
         except Exception:
             return []
 
