@@ -775,5 +775,4 @@ def interactive_command(
 ) -> None:
     """Start an interactive session (search, inspect and download without typing full commands)."""
     app = get_context(ctx)
-    app.banner("interactive")
     raise typer.Exit(run_interactive(app, output=output, limit=limit))
