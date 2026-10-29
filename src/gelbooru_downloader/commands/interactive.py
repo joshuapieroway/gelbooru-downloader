@@ -370,6 +370,10 @@ def _cmd_search(app: AppContext, args: list[str], *, limit: int) -> None:
         "--page": "page",
         "-O": "order",
         "--order": "order",
+        "-r": "rating",
+        "--rating": "rating",
+        "-x": "exclude",
+        "--exclude": "exclude",
     }
     parsed, positional, unknown = _parse_flags(args, known)
     _flag_help(app, unknown)
@@ -384,11 +388,16 @@ def _cmd_search(app: AppContext, args: list[str], *, limit: int) -> None:
         warn(app.console, "-n/--limit and -p/--page must be numbers")
         return
 
+    ratings = parsed.get("rating")
+    exclude = parsed.get("exclude")
+
     with app.console.status(f"[brand]searching {tags}…", spinner="dots"):
         outcome = run_search(
             app,
             tags=tags,
             limit=requested,
+            ratings=ratings.split(",") if ratings else None,
+            exclude=exclude.split(",") if exclude else None,
             order=parsed.get("order"),
             page=page,
             page_size=app.config.general.page_size,
@@ -562,6 +571,10 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
     known = {
         "-n": "limit",
         "--limit": "limit",
+        "-r": "rating",
+        "--rating": "rating",
+        "-x": "exclude",
+        "--exclude": "exclude",
     }
     parsed, positional, unknown = _parse_flags(args, known)
     _flag_help(app, unknown)
@@ -576,11 +589,16 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
         return
     want_images = True
 
+    ratings = parsed.get("rating")
+    exclude = parsed.get("exclude")
+
     with app.console.status(f"[brand]searching {tags}…", spinner="dots"):
         outcome = run_search(
             app,
             tags=tags,
             limit=requested,
+            ratings=ratings.split(",") if ratings else None,
+            exclude=exclude.split(",") if exclude else None,
             page_size=app.config.general.page_size,
         )
     if not outcome.posts:
@@ -640,6 +658,10 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
         "--output": "output",
         "-c": "concurrency",
         "--concurrency": "concurrency",
+        "-r": "rating",
+        "--rating": "rating",
+        "-x": "exclude",
+        "--exclude": "exclude",
         "--dry-run": "flag",
         "--overwrite": "flag",
         "--no-duplicates": "flag",
@@ -659,6 +681,9 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
         warn(app.console, "-n/--limit and -c/--concurrency must be numbers")
         return
 
+    ratings = parsed.get("rating")
+    exclude = parsed.get("exclude")
+
     request = DownloadRequest(
         limit=requested,
         output=Path(parsed["output"]).expanduser() if parsed.get("output") else output,
@@ -667,10 +692,17 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
         dry_run="dry-run" in flags,
         duplicate_check="no-duplicates" in flags,
         archive="archive" in flags or None,
+        ratings=ratings.split(",") if ratings else [],
+        exclude=exclude.split(",") if exclude else [],
     )
     with app.console.status(f"[brand]searching {tags}…", spinner="dots"):
         outcome = run_search(
-            app, tags=tags, limit=requested, page_size=app.config.general.page_size
+            app,
+            tags=tags,
+            limit=requested,
+            ratings=request.ratings,
+            exclude=request.exclude,
+            page_size=app.config.general.page_size,
         )
     if not outcome.posts:
         warn(app.console, f"nothing matched '{tags}'")
