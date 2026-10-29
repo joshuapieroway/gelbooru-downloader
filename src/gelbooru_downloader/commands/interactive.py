@@ -72,6 +72,10 @@ class TagCompleter(Completer):
 
     def get_completions(self, document: Document, complete_event: Any) -> Any:  # noqa: ARG002
         text = document.text_before_cursor
+        # If text ends with a space, user is starting a new word
+        if text and text[-1].isspace():
+            # Don't autocomplete yet - user hasn't typed anything for the new word
+            return
         parts = text.split()
         if not parts:
             return
@@ -211,8 +215,10 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
                     if matching_cmds:
                         yield from command_completer.get_completions(document, complete_event)
             else:
-                # Multi-word input: use command completer
-                yield from command_completer.get_completions(document, complete_event)
+                # Multi-word input: show tag suggestions for the last word
+                tag_results = list(tag_completer.get_completions(document, complete_event))
+                if tag_results:
+                    yield from tag_results
 
     completer = CombinedCompleter()
 
