@@ -44,14 +44,14 @@ __all__ = [
 
 GELBOORU_THEME = Theme(
     {
-        "brand": "bold #ff6ec7",
-        "brand_dim": "#c26fa0",
-        "table_header": "bold #c26fa0",
+        "brand": "bold #4a9eff",
+        "brand_dim": "#2d6bb5",
+        "table_header": "bold #4a9eff",
         "error_header": "bold red",
-        "ok": "bold green",
+        "ok": "bold #4a9eff",
         "warn": "yellow",
         "err": "bold red",
-        "info": "cyan",
+        "info": "#4a9eff",
         "muted": "grey58",
         "id": "bold #7cc4ff",
         "rating_safe": "green",
@@ -60,18 +60,19 @@ GELBOORU_THEME = Theme(
         "rating_explicit": "red",
         "rating_unrated": "grey58",
         "rating_general": "#7cc4ff",
-        "success": "bold green",
+        "success": "bold #4a9eff",
         "error": "bold red",
-        "accent": "bold #ff6ec7",
+        "accent": "bold #4a9eff",
     }
 )
 
 _BANNER = r"""
-  ____       _ _
- / ___| __ _| | |___  _ __ ___   ___ _ __
-| |  _ / _` | | / _ \| '__/ _ \ / __| '_ \
-| |_| | (_| | | | (_) | | |  __/ (__| | | |
- \____|\__,_|_|_|\___/|_|  \___|\___|_| |_|
+██████╗ ███████╗██╗     ██████╗  ██████╗  ██████╗ ██████╗ ██╗   ██╗
+██╔════╝ ██╔════╝██║     ██╔══██╗██╔═══██╗██╔═══██╗██╔══██╗██║   ██║
+██║  ███╗█████╗  ██║     ██████╔╝██║   ██║██║   ██║██████╔╝██║   ██║
+██║   ██║██╔══╝  ██║     ██╔══██╗██║   ██║██║   ██║██╔══██╗██║   ██║
+╚██████╔╝███████╗███████╗██████╔╝╚██████╔╝╚██████╔╝██║  ██║╚██████╔╝
+ ╚═════╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝  ╚═════╝ ╚═╝  ╚═╝ ╚═════╝
 """
 
 _RATING_STYLES = {
@@ -139,8 +140,7 @@ class ConsoleFactory:
 def banner(version: str, subtitle: str = "") -> Panel:
     """The startup banner shown before most commands."""
 
-    title = Text()
-    title.append(_BANNER.strip("\n"), style="brand")
+    title = Text(_BANNER.strip("\n"), style="brand", no_wrap=True)
     footer = f"v{version} — {subtitle}" if subtitle else f"v{version}"
     body: RenderableType = Group(title, Text(footer, style="brand_dim"))
     return Panel(
