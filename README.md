@@ -34,7 +34,7 @@ config file (see `gelbooru config`).
 
 ```bash
 gelbooru search "blue_hair solo" --limit 20
-gelbooru download "landscape" --limit 50 --output ./downloads/landscape
+gelbooru download "landscape" --limit 50 --output ~/Downloads/Gelbooru-downloader/landscape
 gelbooru browse "blue_hair solo" -n 12 --images
 gelbooru export "blue_hair solo" json results.json
 gelbooru post info 1234567

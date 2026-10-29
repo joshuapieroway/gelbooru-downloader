@@ -48,7 +48,7 @@ class GeneralConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    output_dir: Path = Path("./downloads")
+    output_dir: Path = Path("~/Downloads/Gelbooru-downloader")
     concurrency: int = Field(default=5, ge=1, le=64)
     page_size: int = Field(default=100, ge=1, le=100)
     retries: int = Field(default=3, ge=0, le=10)
@@ -63,6 +63,8 @@ class GeneralConfig(BaseModel):
     def _expand(cls, value: Any) -> Any:
         if isinstance(value, str):
             return Path(os.path.expandvars(value)).expanduser()
+        if isinstance(value, Path):
+            return Path(os.path.expandvars(str(value))).expanduser()
         return value
 
     @field_validator("filename_template")
@@ -425,7 +427,7 @@ def config_template() -> str:
 
 [general]
 # Where downloads are written (relative paths resolve against the current directory).
-output_dir = "./downloads"
+output_dir = "~/Downloads/Gelbooru-downloader"
 # Number of simultaneous image downloads (1-64).
 concurrency = 5
 # Posts requested per API page (1-100; Gelbooru hard limit).
