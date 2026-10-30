@@ -21,7 +21,6 @@ api_key = "your_key_here"
 The dapi only serves roughly the newest 20,000 posts. Try:
 - A smaller `--page`
 - Narrower tags
-- Setting API credentials (unauthenticated requests have lower limits)
 
 ### Images Not Rendering in Browse
 - Browse uses coloured ASCII art which works in any terminal
