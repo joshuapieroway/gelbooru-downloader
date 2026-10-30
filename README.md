@@ -75,6 +75,20 @@ Tests and dev tooling live on the `development` branch. On `main`:
 .venv/bin/ruff format src     # format
 ```
 
+## Documentation
+
+Detailed documentation is available in the [docs/](docs/) directory:
+
+- [Installation](docs/installation.md)
+- [Configuration](docs/configuration.md)
+- [Commands Reference](docs/commands.md)
+- [Interactive Mode](docs/interactive.md)
+- [Filtering & Search](docs/filtering.md)
+- [Downloading](docs/downloading.md)
+- [Presets](docs/presets.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture.md)
+
 ## License
 
 MIT — see `LICENSE`.
