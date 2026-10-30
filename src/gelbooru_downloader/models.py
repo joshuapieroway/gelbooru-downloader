@@ -8,6 +8,7 @@ coerced on the way in. Nothing is ever invented — if the API did not give us a
 
 from __future__ import annotations
 
+import contextlib
 import html
 import math
 from collections.abc import Iterable, Iterator, Sequence
@@ -141,6 +142,57 @@ def _as_tags(value: Any) -> str:
 
 #: Gelbooru returns ``created_at`` as a human readable string in JSON responses
 #: (e.g. "Fri Oct 16 18:15:34 -0500 2026"); XML responses use unix seconds.
+#: Gelbooru returns ``created_at`` as a human readable string in JSON responses
+#: (e.g. "Fri Oct 16 18:15:34 -0500 2026"); XML responses use unix seconds.
+#: Month abbreviations may arrive in non-English locales, so we map common
+#: variants to their English equivalents before parsing.
+_MONTH_ALIASES: dict[str, str] = {
+    # French (non-English abbreviations only)
+    "janv": "Jan",
+    "févr": "Feb",
+    "mars": "Mar",
+    "avr": "Apr",
+    "juin": "Jun",
+    "juil": "Jul",
+    "août": "Aug",
+    "sept": "Sep",
+    "déc": "Dec",
+    # German (non-English abbreviations only)
+    "mär": "Mar",
+    "okt": "Oct",
+    "dez": "Dec",
+    # Spanish (non-English abbreviations only)
+    "ene": "Jan",
+    "abr": "Apr",
+    "ago": "Aug",
+    "dic": "Dec",
+    # Italian (non-English abbreviations only)
+    "gen": "Jan",
+    "mag": "May",
+    "giu": "Jun",
+    "lug": "Jul",
+    "ott": "Oct",
+    # Portuguese (non-English abbreviations only)
+    "fev": "Feb",
+    "out": "Oct",
+    # Japanese (romanized)
+    "1月": "Jan",
+    "2月": "Feb",
+    "3月": "Mar",
+    "4月": "Apr",
+    "5月": "May",
+    "6月": "Jun",
+    "7月": "Jul",
+    "8月": "Aug",
+    "9月": "Sep",
+    "10月": "Oct",
+    "11月": "Nov",
+    "12月": "Dec",
+}
+# English and shared abbreviations (jan, feb, mar, etc.) are handled natively
+# by strptime with the C/POSIX locale, so they are not listed here.
+
+
 _TIMESTAMP_FORMATS = (
     "%a %b %d %H:%M:%S %z %Y",
     "%a %b %d %H:%M:%S %Y",
@@ -148,6 +200,19 @@ _TIMESTAMP_FORMATS = (
     "%Y-%m-%dT%H:%M:%S%z",
     "%Y-%m-%d %H:%M:%S",
 )
+
+
+def _normalize_month(text: str) -> str:
+    """Replace non-English month abbreviations with English ones."""
+    words = text.split()
+    result = []
+    for word in words:
+        lower = word.lower().rstrip(".,")
+        if lower in _MONTH_ALIASES:
+            result.append(_MONTH_ALIASES[lower])
+        else:
+            result.append(word)
+    return " ".join(result)
 
 
 def _as_timestamp(value: Any) -> int | None:
@@ -162,11 +227,31 @@ def _as_timestamp(value: Any) -> int | None:
         return None
     if text.isdigit():
         return int(text)
-    for fmt in _TIMESTAMP_FORMATS:
-        try:
-            return int(datetime.strptime(text, fmt).timestamp())
-        except ValueError:
-            continue
+    normalized = _normalize_month(text)
+    # Ensure English locale for month/weekday parsing
+    import locale
+
+    prev_locale = locale.getlocale(locale.LC_TIME)
+    try:
+        locale.setlocale(locale.LC_TIME, "C")
+    except locale.Error:
+        prev_locale = None
+    try:
+        for fmt in _TIMESTAMP_FORMATS:
+            try:
+                return int(datetime.strptime(normalized, fmt).timestamp())
+            except ValueError:
+                continue
+        # Last resort: try original text
+        for fmt in _TIMESTAMP_FORMATS:
+            try:
+                return int(datetime.strptime(text, fmt).timestamp())
+            except ValueError:
+                continue
+    finally:
+        if prev_locale is not None:
+            with contextlib.suppress(locale.Error):
+                locale.setlocale(locale.LC_TIME, prev_locale)
     return None
 
 

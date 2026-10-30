@@ -13,15 +13,15 @@ this file in sync with `AGENTS.md`.
 - [x] Verify resume correctness when the server ignores `Range`: the partial
       `.part` file is discarded, and the recorded history row now reflects the
       bytes actually on disk (downloader finalises `total` from `target.stat()`).
-- [ ] Handle `created_at` strings with locale-specific month names (Gelbooru
-      occasionally returns non-English month abbreviations).
+- [x] Handle `created_at` strings with locale-specific month names: added
+      `_MONTH_ALIASES` mapping and locale normalization in `_as_timestamp`.
 
 ## P1 — Quality / maintainability
 
 - [ ] Add static type checking (`mypy` or `pyright`) to CI; annotate the few
       `Any` escape hatches in `commands/interactive.py` and `app.py`.
-- [ ] Replace `save_config`'s `__import__('gelbooru_downloader')` hack with a
-      normal import of `__version__`.
+- [x] Replace `save_config`'s `__import__('gelbooru_downloader')` hack with
+      `importlib.metadata.version` (no circular import needed).
 - [ ] Split `commands/download.py` (very long Typer option list) into a shared
       option dataclass / decorator to reduce duplication with `post.py`,
       `presets.py` and `batch.py`.
@@ -33,8 +33,8 @@ this file in sync with `AGENTS.md`.
 ## P2 — Features
 
 - [ ] Support downloading by MD5 or filename template `{tags}` / `{score}`.
-- [ ] Add an `gelbooru export` command reusing `export_posts` (today only
-      available through `search --format`).
+- [x] Add `gelbooru export` command reusing `export_posts` (also available
+      through `search --format`).
 - [ ] Optional progress for multi-page searches (currently only downloads show
       progress).
 - [ ] Watch mode: persist seen post ids across runs (today it relies on the
@@ -49,3 +49,13 @@ this file in sync with `AGENTS.md`.
       `__init__.py` to match the documented API.
 - [x] Fix unreachable interactive `search` result table.
 - [x] Add project-level `AGENTS.md`.
+- [x] Add interactive `browse` command with paged thumbnails and colored ASCII
+      image previews.
+- [x] Add prompt_toolkit REPL with Gelbooru tag autocomplete (sorted by count).
+- [x] Add `--rating` and `--exclude` support to interactive commands.
+- [x] Change default output dir to `~/Downloads/Gelbooru-downloader`.
+- [x] Remake banner with blue theme and new GELBOORU logo.
+- [x] Default to error-only logging for public builds.
+- [x] Add `gelbooru export` command (JSON/CSV).
+- [x] Replace `__import__` hack in `config.py` with `importlib.metadata`.
+- [x] Handle locale-specific month names in `created_at` parsing.
