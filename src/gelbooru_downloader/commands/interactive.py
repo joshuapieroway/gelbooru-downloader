@@ -662,6 +662,8 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
         "--rating": "rating",
         "-x": "exclude",
         "--exclude": "exclude",
+        "-F": "filename",
+        "--filename": "filename",
         "--dry-run": "flag",
         "--overwrite": "flag",
         "--no-duplicates": "flag",
@@ -683,6 +685,7 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
 
     ratings = parsed.get("rating")
     exclude = parsed.get("exclude")
+    filename = parsed.get("filename")
 
     request = DownloadRequest(
         limit=requested,
@@ -694,6 +697,7 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
         archive="archive" in flags or None,
         ratings=ratings.split(",") if ratings else [],
         exclude=exclude.split(",") if exclude else [],
+        filename_template=filename,
     )
     with app.console.status(f"[brand]searching {tags}…", spinner="dots"):
         outcome = run_search(

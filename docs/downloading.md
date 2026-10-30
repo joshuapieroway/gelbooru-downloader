@@ -23,9 +23,15 @@ gelbooru download "1girl" --concurrency 10 --limit 100
 
 ```bash
 gelbooru download "1girl" --filename "{id}_{rating}" --limit 10
+gelbooru download "sort:score 1girl" --filename "{index}_{score}_{id}" --limit 50
 ```
 
-Available placeholders: `{id}`, `{md5}`, `{rating}`, `{index}`.
+Available placeholders: `{id}`, `{md5}`, `{rating}`, `{index}`, `{score}`.
+
+- `{index}` is zero-padded (e.g., `0001`, `0002`) so files sort correctly
+- `{score}` is the post score (useful with `sort:score`)
+- When using `sort:score`, `sort:width`, etc., use `{index}` or `{score}` in
+  the filename to preserve the sort order
 
 Path traversal is prevented: templates may not contain separators or `..`.
 

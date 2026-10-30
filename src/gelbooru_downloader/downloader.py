@@ -188,14 +188,15 @@ def target_path(
         "id": str(post.id),
         "md5": post.md5 or "",
         "rating": post.rating or "unrated",
-        "index": str(index) if index is not None else "",
+        "index": f"{index:04d}" if index is not None else "",
+        "score": str(post.score) if post.score is not None else "",
     }
     try:
         stem = options.filename_template.format(**stem_fields)
     except (KeyError, IndexError, ValueError) as exc:
         msg = (
             f"invalid filename_template {options.filename_template!r}: {exc}. "
-            "Available fields: {id}, {md5}, {rating}, {index}"
+            "Available fields: {id}, {md5}, {rating}, {index}, {score}"
         )
         raise DownloadError(msg, post_id=post.id) from exc
 
