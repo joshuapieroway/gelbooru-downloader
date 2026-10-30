@@ -451,6 +451,9 @@ def execute_download(
     """Search for ``tags`` and download everything that matches."""
 
     limit = resolve_limit(request.limit, app.config)
+    # Auto-detect sort order in tags and use index-based filenames
+    if request.filename_template is None and ("sort:" in tags.lower() or "order:" in tags.lower()):
+        request.filename_template = "{index}_{id}"
     outcome = run_search(
         app,
         tags=tags,

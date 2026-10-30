@@ -687,6 +687,10 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
     exclude = parsed.get("exclude")
     filename = parsed.get("filename")
 
+    # Auto-detect sort order in tags
+    if filename is None and ("sort:" in tags.lower() or "order:" in tags.lower()):
+        filename = "{index}_{id}"
+
     request = DownloadRequest(
         limit=requested,
         output=Path(parsed["output"]).expanduser() if parsed.get("output") else output,
