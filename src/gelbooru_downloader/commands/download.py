@@ -203,6 +203,10 @@ def download(
     if no_progress:
         app.config.display.show_progress = False
 
+    # Auto-detect sort order in tags and use index-based filenames
+    if request.filename_template is None and ("sort:" in tags.lower() or "order:" in tags.lower()):
+        request.filename_template = "{index}_{id}"
+
     app.banner(f'downloading "{tags}"')
     if dry_run:
         _dry_run(app, tags, request)
