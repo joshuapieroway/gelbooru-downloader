@@ -184,19 +184,22 @@ def target_path(
 
     ext = (extension or post.extension or extension_from_url(post.file_url or "") or "jpg").lower()
     ext = ext.lstrip(".") or "jpg"
+    # First few tags joined by underscores for filename use
+    tags_slug = "_".join(post.tag_list[:5]) if post.tag_list else ""
     stem_fields = {
         "id": str(post.id),
         "md5": post.md5 or "",
         "rating": post.rating or "unrated",
         "index": f"{index:04d}" if index is not None else "",
         "score": str(post.score) if post.score is not None else "",
+        "tags": tags_slug,
     }
     try:
         stem = options.filename_template.format(**stem_fields)
     except (KeyError, IndexError, ValueError) as exc:
         msg = (
             f"invalid filename_template {options.filename_template!r}: {exc}. "
-            "Available fields: {id}, {md5}, {rating}, {index}, {score}"
+            "Available fields: {id}, {md5}, {rating}, {index}, {score}, {tags}"
         )
         raise DownloadError(msg, post_id=post.id) from exc
 

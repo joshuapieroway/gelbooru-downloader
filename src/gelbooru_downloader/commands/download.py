@@ -100,7 +100,9 @@ def download(
     filename_template: Annotated[
         str | None,
         typer.Option(
-            "--filename", "-F", help="Filename template: {id}, {md5}, {rating}, {index}, {score}."
+            "--filename",
+            "-F",
+            help="Filename template: {id}, {md5}, {rating}, {index}, {score}, {tags}.",
         ),
     ] = None,
     rating: Annotated[

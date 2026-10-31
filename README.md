@@ -89,6 +89,34 @@ Detailed documentation is available in the [docs/](docs/) directory:
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
 
+## Shell Completion
+
+Install shell completion for your shell:
+
+```bash
+# Bash
+gelbooru --install-completion bash
+
+# Zsh
+gelbooru --install-completion zsh
+
+# Fish
+gelbooru --install-completion fish
+```
+
+Or add to your shell profile:
+
+```bash
+# Bash (~/.bashrc)
+eval "$(_GELBOORU_COMPLETE=bash_source gelbooru)"
+
+# Zsh (~/.zshrc)
+eval "$(_GELBOORU_COMPLETE=zsh_source gelbooru)"
+
+# Fish (~/.config/fish/completions/gelbooru.fish)
+_GELBOORU_COMPLETE=fish_source gelbooru > ~/.config/fish/completions/gelbooru.fish
+```
+
 ## License
 
 MIT — see `LICENSE`.
