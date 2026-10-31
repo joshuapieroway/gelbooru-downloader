@@ -137,19 +137,26 @@ class ConsoleFactory:
 # --------------------------------------------------------------------------- #
 # Banner and messages
 # --------------------------------------------------------------------------- #
-def banner(version: str, subtitle: str = "") -> Panel:
-    """The startup banner shown before most commands."""
+def banner(version: str, subtitle: str = "", *, interactive: bool = False) -> RenderableType:
+    """The startup banner shown before most commands.
+
+    In normal mode a plain (borderless) banner is returned.  In interactive
+    mode a bordered panel is returned so it can be pinned at the top of the
+    screen.
+    """
 
     title = Text(_BANNER.strip("\n"), style="brand", no_wrap=True)
     footer = f"v{version} — {subtitle}" if subtitle else f"v{version}"
     body: RenderableType = Group(title, Text(footer, style="brand_dim"))
-    return Panel(
-        body,
-        border_style="brand_dim",
-        padding=(0, 2),
-        title="[bold]gelbooru[/]",
-        title_align="left",
-    )
+    if interactive:
+        return Panel(
+            body,
+            border_style="brand_dim",
+            padding=(0, 2),
+            title="[bold]gelbooru[/]",
+            title_align="left",
+        )
+    return body
 
 
 def ok(console: Console, message: str) -> None:

@@ -24,6 +24,11 @@ arrow) to accept the suggestion.
 Typing any text that isn't a recognized command is treated as a browse query.
 So you can just type `blue_hair solo` and press Enter to browse.
 
+### Sticky Banner
+The banner stays pinned at the top of the terminal while you work; command
+output scrolls underneath it. Set `show_banner = false` in the `[display]`
+section of your config to turn this off.
+
 ### Bottom Toolbar
 A toolbar at the bottom of the screen shows available commands and keyboard
 shortcuts.

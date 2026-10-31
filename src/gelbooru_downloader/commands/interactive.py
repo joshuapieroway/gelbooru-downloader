@@ -25,6 +25,7 @@ from rich.prompt import Prompt
 
 from ..app import AppContext, get_context, run_async
 from ..console import (
+    GELBOORU_THEME,
     _rating_text,
     format_post_table,
     ok,
@@ -146,14 +147,84 @@ class TagCompleter(Completer):
             return []
 
 
+def _rendered_rows(console: Any, renderable: Any) -> int:
+    """Return how many terminal rows ``renderable`` occupies at this width."""
+
+    from io import StringIO
+
+    from rich.console import Console
+
+    buffer = StringIO()
+    probe = Console(file=buffer, width=console.width, theme=GELBOORU_THEME)
+    probe.print(renderable)
+    return max(1, len(buffer.getvalue().splitlines()))
+
+
+def _write_control(console: Any, sequence: str) -> None:
+    """Write a raw terminal control sequence, ignoring non-terminal streams."""
+
+    stream = getattr(console, "file", None)
+    if stream is None:
+        return
+    try:
+        stream.write(sequence)
+        stream.flush()
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _pin_banner(app: AppContext, renderable: Any) -> int:
+    """Print the banner and pin it to the top of the terminal.
+
+    A DECSTBM scroll region is set below the banner, so command output scrolls
+    underneath it instead of pushing it off-screen.  Returns the number of
+    reserved rows (``0`` when the banner could not be pinned, e.g. when output
+    is redirected or the terminal is too short).
+    """
+
+    console = app.console
+    if console.is_terminal:
+        console.clear()
+    console.print(renderable)
+
+    if not console.is_terminal or sys.platform == "win32":
+        return 0
+
+    rows = console.size.height
+    height = _rendered_rows(console, renderable)
+    if rows < height + 4:
+        return 0
+
+    # DECSTBM homes the cursor, so move it back below the banner afterwards.
+    _write_control(console, f"\x1b[{height + 1};{rows}r\x1b[{height + 1};1H")
+    return height
+
+
+def _unpin_banner(app: AppContext, rows: int) -> None:
+    """Release the scroll region reserved by :func:`_pin_banner`."""
+
+    if rows:
+        # Resetting DECSTBM also homes the cursor; save and restore it so the
+        # shell prompt continues where the REPL left off.
+        _write_control(app.console, "\x1b7\x1b[r\x1b8")
+
+
 def run_interactive(app: AppContext, *, output: Path | None = None, limit: int = 25) -> int:
     """Run the REPL loop; returns the process exit code."""
 
     from .. import __version__
-    from ..console import banner
+    from ..console import banner as make_banner
 
+    pinned_rows = 0
     if app.config.display.show_banner:
-        app.console.print(banner(__version__, "interactive mode — type 'help' for commands"))
+        pinned_rows = _pin_banner(
+            app,
+            make_banner(
+                __version__,
+                "interactive mode — type 'help' for commands",
+                interactive=True,
+            ),
+        )
     app.console.print("[muted]Ctrl+C or 'quit' to leave. Tab to autocomplete, ↑↓ for history.[/]")
     app.console.print(
         "[muted]Type any tags to browse, or a command (search, download, info, ...).[/]"
@@ -254,31 +325,34 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
         ),
     )
 
-    while True:
-        try:
-            raw = session.prompt("gelbooru> ")
-        except (EOFError, KeyboardInterrupt):
-            app.console.print("\n[muted]bye[/]")
-            return 0
-        except Exception:  # pragma: no cover
-            app.console.print("\n[muted]bye[/]")
-            return 0
+    try:
+        while True:
+            try:
+                raw = session.prompt("gelbooru> ")
+            except (EOFError, KeyboardInterrupt):
+                app.console.print("\n[muted]bye[/]")
+                return 0
+            except Exception:  # pragma: no cover
+                app.console.print("\n[muted]bye[/]")
+                return 0
 
-        raw = raw.strip()
-        if not raw:
-            continue
-        if raw.lower() in {"quit", "exit", "q"}:
-            app.console.print("[muted]bye[/]")
-            return 0
-        try:
-            _dispatch(app, raw, output=output, limit=limit)
-        except GelbooruError as exc:
-            warn(app.console, str(exc))
-        except KeyboardInterrupt:
-            app.console.print("[warn]operation cancelled[/]")
-        except Exception as exc:
-            app.console.print(f"[err]unexpected error:[/] {exc}")
-        app.console.print("")
+            raw = raw.strip()
+            if not raw:
+                continue
+            if raw.lower() in {"quit", "exit", "q"}:
+                app.console.print("[muted]bye[/]")
+                return 0
+            try:
+                _dispatch(app, raw, output=output, limit=limit)
+            except GelbooruError as exc:
+                warn(app.console, str(exc))
+            except KeyboardInterrupt:
+                app.console.print("[warn]operation cancelled[/]")
+            except Exception as exc:
+                app.console.print(f"[err]unexpected error:[/] {exc}")
+            app.console.print("")
+    finally:
+        _unpin_banner(app, pinned_rows)
 
     return 0
 

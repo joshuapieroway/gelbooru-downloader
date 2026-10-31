@@ -45,6 +45,9 @@ this file in sync with `AGENTS.md`.
 
 ## Recently completed
 
+- [x] Bump the version to 1.1.0 for the interactive-mode release.
+- [x] Pin the interactive banner to the top of the screen and drop the banner
+      border outside interactive mode.
 - [x] Move active session to `/opt/gelbooru-downloader` as the main project.
 - [x] Fix public API exports (`GelbooruClient`, `Downloader`, `Config`) in
       `__init__.py` to match the documented API.
