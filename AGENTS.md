@@ -16,7 +16,8 @@ factual and up to date — update it when the codebase or tooling changes.
 ## Working in this repo
 
 ```bash
-# set up (venv already exists at .venv on this machine)
+# set up a virtualenv (examples below use .venv)
+python -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 
 # (tests are on the `development` branch)
@@ -31,9 +32,9 @@ factual and up to date — update it when the codebase or tooling changes.
 .venv/bin/gelbooru search "blue_hair solo" --limit 5
 ```
 
-Notes for this machine: there is no global `pip`/`node`; always use the venv's
-interpreter. `pytest` is configured with `asyncio_mode = "auto"` and treats
-`DeprecationWarning` in `gelbooru_downloader.*` as an error.
+Run all tooling through the virtualenv (`.venv/bin/...`). `pytest` is
+configured with `asyncio_mode = "auto"` and treats `DeprecationWarning` in
+`gelbooru_downloader.*` as an error.
 
 ## Architecture
 
