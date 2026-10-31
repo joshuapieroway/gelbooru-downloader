@@ -45,6 +45,11 @@ this file in sync with `AGENTS.md`.
 
 ## Recently completed
 
+- [x] Fix interactive `browse` preview drift: kitty images now render in fixed
+      rectangles below the pinned banner, and the page area is cleared before
+      each redraw and on exit.
+- [x] Bump the version to 1.1.1 for the preview-alignment release and add a
+      root `CHANGELOG.md`.
 - [x] Bump the version to 1.1.0 for the interactive-mode release.
 - [x] Pin the interactive banner to the top of the screen and drop the banner
       border outside interactive mode.

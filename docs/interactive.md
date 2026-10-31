@@ -26,8 +26,10 @@ So you can just type `blue_hair solo` and press Enter to browse.
 
 ### Sticky Banner
 The banner stays pinned at the top of the terminal while you work; command
-output scrolls underneath it. Set `show_banner = false` in the `[display]`
-section of your config to turn this off.
+output scrolls underneath it. Browse pages are drawn below the banner in fixed
+screen cells, so previews stay aligned with their post lines as you page through
+results. Set `show_banner = false` in the `[display]` section of your config to
+turn this off.
 
 ### Bottom Toolbar
 A toolbar at the bottom of the screen shows available commands and keyboard
@@ -60,8 +62,12 @@ shortcuts.
 
 ## Image Previews
 
-Browse mode renders images as coloured ASCII art inline. Images are downloaded
-to a temporary file, rendered, and immediately deleted — no storage is used.
+Browse mode uses the kitty graphics protocol (`kitty +kitten icat`) when
+available, with coloured ASCII art as a fallback. In interactive mode previews
+are fitted into fixed cells below the pinned banner, so tall images cannot
+scroll the page or drift away from their post lines. Pages are cleared before
+each redraw and when browse exits. Images are downloaded to a temporary file,
+rendered, and immediately deleted — no storage is used.
 
 ## Tips
 

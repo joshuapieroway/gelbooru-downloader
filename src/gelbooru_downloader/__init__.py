@@ -27,7 +27,7 @@ __all__ = ["Config", "Downloader", "GelbooruClient", "__version__"]
 try:  # pragma: no cover - depends on install method
     __version__ = _version("gelbooru-downloader")
 except PackageNotFoundError:  # pragma: no cover - running from a source checkout
-    __version__ = "1.1.0"
+    __version__ = "1.1.1"
 
 # Public API re-exports (lazy-ish: imported at module load).
 from .api import GelbooruClient

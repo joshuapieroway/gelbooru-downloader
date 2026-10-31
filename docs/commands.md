@@ -173,7 +173,9 @@ gelbooru watch "landscape" --once --runs 5
 
 ## interactive
 
-REPL mode with tab completion and Gelbooru tag autocomplete.
+REPL mode with tab completion and Gelbooru tag autocomplete. The banner stays
+pinned at the top of the terminal, and `browse` pages render kitty image
+previews in fixed cells below it (with an ASCII fallback).
 
 ```bash
 gelbooru interactive

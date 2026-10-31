@@ -138,7 +138,7 @@ class DownloadOptions:
     folder_tag_count: int = 2
     min_size: int | None = None
     max_size: int | None = None
-    user_agent: str = "GelbooruCLI/1.0"
+    user_agent: str = "GelbooruCLI/1.1.1"
     #: Sent only for gelbooru.com hosts, which hotlink-protect their CDN.
     referer: str | None = None
     accepted_prefixes: tuple[str, ...] = _ACCEPTED_PREFIXES

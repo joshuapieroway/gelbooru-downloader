@@ -48,7 +48,7 @@ gelbooru presets download anime
 |---|---|
 | `search TAGS` | Search and render/export results |
 | `download TAGS` | Search and download matching posts |
-| `browse TAGS` | Paged thumbnail view with titles and navigation (colored ASCII previews) |
+| `browse TAGS` | Paged thumbnail view with titles, navigation, and kitty image previews (ASCII fallback) |
 | `export TAGS FORMAT FILE` | Export search results to JSON or CSV |
 | `post info ID` / `post download ID...` | Inspect or fetch individual posts |
 | `presets ...` | Save and reuse tag searches |

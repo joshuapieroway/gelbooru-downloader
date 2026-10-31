@@ -343,7 +343,7 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
                 app.console.print("[muted]bye[/]")
                 return 0
             try:
-                _dispatch(app, raw, output=output, limit=limit)
+                _dispatch(app, raw, output=output, limit=limit, banner_rows=pinned_rows)
             except GelbooruError as exc:
                 warn(app.console, str(exc))
             except KeyboardInterrupt:
@@ -357,7 +357,14 @@ def run_interactive(app: AppContext, *, output: Path | None = None, limit: int =
     return 0
 
 
-def _dispatch(app: AppContext, line: str, *, output: Path | None, limit: int) -> None:
+def _dispatch(
+    app: AppContext,
+    line: str,
+    *,
+    output: Path | None,
+    limit: int,
+    banner_rows: int = 0,
+) -> None:
     """Parse and execute one REPL line."""
     try:
         parts = shlex.split(line)
@@ -373,7 +380,7 @@ def _dispatch(app: AppContext, line: str, *, output: Path | None, limit: int) ->
     elif command in {"search", "find", "s"}:
         _cmd_search(app, args, limit=limit)
     elif command in {"browse", "br", "b"}:
-        _cmd_browse(app, args, limit=limit)
+        _cmd_browse(app, args, limit=limit, banner_rows=banner_rows)
     elif command in {"download", "dl", "d"}:
         _cmd_download(app, args, output=output, limit=limit)
     elif command in {"info", "show", "post"}:
@@ -392,7 +399,7 @@ def _dispatch(app: AppContext, line: str, *, output: Path | None, limit: int) ->
         raise EOFError
     else:
         # Treat unknown input as a browse query (default action)
-        _cmd_browse(app, parts, limit=limit)
+        _cmd_browse(app, parts, limit=limit, banner_rows=banner_rows)
 
 
 def _parse_flags(
@@ -551,97 +558,150 @@ def _text_thumbnail(console: Any, url: str | None, *, width: int = 30) -> None:
         return
 
 
-def _render_preview(console: Any, url: str | None, *, force_text: bool = False) -> None:
-    """Show a preview image using the kitty graphics protocol."""
+def _render_preview(
+    console: Any,
+    url: str | None,
+    *,
+    force_text: bool = False,
+    place: tuple[int, int, int] | None = None,
+) -> None:
+    """Show a preview image using the kitty graphics protocol.
+
+    When ``place`` is given as ``(columns, rows, top_row)`` the image is fitted
+    into that exact screen rectangle.  This keeps previews aligned inside the
+    interactive scroll region, where a tall image would otherwise scroll the
+    page and drift away from its post line.
+    """
 
     if not url:
         return
-    if not force_text and _supports_inline_images():
-        try:
-            import io
-            from urllib.parse import urlsplit
-
-            import httpx
-
-            host = (urlsplit(url).hostname or "").lower()
-            headers: dict[str, str] = {}
-            if host == "gelbooru.com" or host.endswith(".gelbooru.com"):
-                headers["Referer"] = "https://gelbooru.com/"
-            response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
-            response.raise_for_status()
-            content_type = (
-                (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
-            )
-            if not content_type.startswith("image/"):
-                console.print(f"   [muted](not an image: {content_type})[/]")
-                return
-
-            import os
-            import tempfile
-
-            # Save the image to a temp file
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
-                handle.write(response.content)
-                path = handle.name
-
-            try:
-                # Use kitty +kitten icat to display the image.
-                # This runs in the user's terminal and handles all the
-                # protocol details.
-                ret = os.system(f"kitty +kitten icat --align left {path}")  # noqa: S605
-                if ret != 0:
-                    console.print(f"   [muted](icat exited with code {ret})[/]")
-                    # Fall back to kitty graphics protocol
-                    try:
-                        from PIL import Image
-
-                        img = Image.open(io.BytesIO(response.content))
-                        max_width = 80
-                        if img.width > max_width:
-                            ratio = max_width / img.width
-                            new_height = int(img.height * ratio)
-                            img = img.resize((max_width, new_height))
-
-                        png_buffer = io.BytesIO()
-                        img.save(png_buffer, format="PNG")
-                        png_data = png_buffer.getvalue()
-                        b64_data = base64.b64encode(png_data).decode("ascii")
-
-                        chunk_size = 4096
-                        chunks = [
-                            b64_data[i : i + chunk_size]
-                            for i in range(0, len(b64_data), chunk_size)
-                        ]
-
-                        sys.stdout.flush()
-                        if len(chunks) == 1:
-                            sys.stdout.write(f"\x1b_Ga=T,f=100,t=d;{chunks[0]}\x1b\\")
-                        else:
-                            sys.stdout.write(f"\x1b_Ga=T,f=100,t=d,m=1;{chunks[0]}\x1b\\")
-                            for i, chunk in enumerate(chunks[1:], 1):
-                                m = "1" if i < len(chunks) - 1 else "0"
-                                sys.stdout.write(f"\x1b_Gm={m};{chunk}\x1b\\")
-                        sys.stdout.flush()
-                        sys.stdout.write("\n")
-                        sys.stdout.flush()
-                    except Exception:
-                        console.print("   [muted](image could not be rendered)[/]")
-                else:
-                    console.print()
-            finally:
-                import contextlib
-                from pathlib import Path
-
-                with contextlib.suppress(OSError):
-                    Path(path).unlink(missing_ok=True)
-        except Exception as exc:
-            console.print(f"   [muted](image render failed: {exc})[/]")
-    else:
+    if force_text or not _supports_inline_images():
         _text_thumbnail(console, url)
         return
 
+    try:
+        import io
+        from urllib.parse import urlsplit
 
-def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
+        import httpx
+
+        host = (urlsplit(url).hostname or "").lower()
+        headers: dict[str, str] = {}
+        if host == "gelbooru.com" or host.endswith(".gelbooru.com"):
+            headers["Referer"] = "https://gelbooru.com/"
+        response = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
+        response.raise_for_status()
+        content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if not content_type.startswith("image/"):
+            console.print(f"   [muted](not an image: {content_type})[/]")
+            return
+
+        import tempfile
+
+        # Save the image to a temp file
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(response.content)
+            path = handle.name
+
+        try:
+            if place is not None:
+                import shutil
+                import subprocess
+
+                columns, rows, top = place
+                executable = shutil.which("kitty")
+                if executable is None:
+                    console.print("   [muted](preview unavailable: kitty not found)[/]")
+                    return
+                result = subprocess.run(  # noqa: S603
+                    [
+                        executable,
+                        "+kitten",
+                        "icat",
+                        "--align",
+                        "left",
+                        "--place",
+                        f"{columns}x{rows}@0x{top}",
+                        path,
+                    ],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    console.print("   [muted](preview unavailable)[/]")
+                return
+
+            import os
+
+            # Use kitty +kitten icat to display the image.
+            # This runs in the user's terminal and handles all the
+            # protocol details.
+            ret = os.system(f"kitty +kitten icat --align left {path}")  # noqa: S605
+            if ret != 0:
+                console.print(f"   [muted](icat exited with code {ret})[/]")
+                # Fall back to kitty graphics protocol
+                try:
+                    from PIL import Image
+
+                    img = Image.open(io.BytesIO(response.content))
+                    max_width = 80
+                    if img.width > max_width:
+                        ratio = max_width / img.width
+                        new_height = int(img.height * ratio)
+                        img = img.resize((max_width, new_height))
+
+                    png_buffer = io.BytesIO()
+                    img.save(png_buffer, format="PNG")
+                    png_data = png_buffer.getvalue()
+                    b64_data = base64.b64encode(png_data).decode("ascii")
+
+                    chunk_size = 4096
+                    chunks = [
+                        b64_data[i : i + chunk_size] for i in range(0, len(b64_data), chunk_size)
+                    ]
+
+                    sys.stdout.flush()
+                    if len(chunks) == 1:
+                        sys.stdout.write(f"\x1b_Ga=T,f=100,t=d;{chunks[0]}\x1b\\")
+                    else:
+                        sys.stdout.write(f"\x1b_Ga=T,f=100,t=d,m=1;{chunks[0]}\x1b\\")
+                        for i, chunk in enumerate(chunks[1:], 1):
+                            m = "1" if i < len(chunks) - 1 else "0"
+                            sys.stdout.write(f"\x1b_Gm={m};{chunk}\x1b\\")
+                    sys.stdout.flush()
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                except Exception:
+                    console.print("   [muted](image could not be rendered)[/]")
+            else:
+                console.print()
+        finally:
+            import contextlib
+            from pathlib import Path
+
+            with contextlib.suppress(OSError):
+                Path(path).unlink(missing_ok=True)
+    except Exception as exc:
+        console.print(f"   [muted](image render failed: {exc})[/]")
+
+
+def _clear_content_area(app: AppContext, banner_rows: int) -> None:
+    """Erase everything below the pinned banner and drop old kitty images."""
+
+    if _supports_inline_images():
+        _write_control(app.console, "\x1b_Ga=d,d=A\x1b\\")
+    _write_control(app.console, f"\x1b[{banner_rows + 1};1H\x1b[J")
+
+
+def _browse_image_box(app: AppContext, banner_rows: int, count: int) -> tuple[int, int]:
+    """Return image ``(rows, columns)`` that let a page fit below the banner."""
+
+    content_rows = max(1, app.console.size.height - banner_rows)
+    usable = max(1, content_rows - 2)  # page header + prompt
+    block_rows = max(2, usable // max(1, count))
+    return max(1, block_rows - 1), max(10, min(app.console.size.width, 40))
+
+
+def _cmd_browse(app: AppContext, args: list[str], *, limit: int, banner_rows: int = 0) -> None:
     known = {
         "-n": "limit",
         "--limit": "limit",
@@ -689,7 +749,13 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
     page_size = 3
     page = 0
     total_pages = max(1, -(-len(posts) // page_size))
+    inline_layout = bool(banner_rows) and _supports_inline_images()
     while True:
+        if inline_layout:
+            _clear_content_area(app, banner_rows)
+            image_rows, image_cols = _browse_image_box(app, banner_rows, page_size)
+            row = banner_rows + 2  # first content row is the page header
+
         app.console.print(f"[muted]page {page + 1}/{total_pages} · {len(posts)} post(s)[/]")
         start = page * page_size
         for offset, post in enumerate(posts[start : start + page_size], start):
@@ -698,10 +764,22 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
                 f"{post.width or '?'}×{post.height or '?'}  {post.summary(4)}"
             )
             if want_images:
-                _render_preview(app.console, post.preview_url or post.file_url)
+                if inline_layout:
+                    _render_preview(
+                        app.console,
+                        post.preview_url or post.file_url,
+                        place=(image_cols, image_rows, row),
+                    )
+                    row += 1 + image_rows
+                    _write_control(app.console, f"\x1b[{row};1H")
+                else:
+                    _render_preview(app.console, post.preview_url or post.file_url)
             elif post.preview_url:
                 app.console.print(f"   [muted]{post.preview_url}[/]")
-        app.console.print("")
+                if inline_layout:
+                    row += 1
+        if not inline_layout:
+            app.console.print("")
         choices = []
         if page < total_pages - 1:
             choices.append("next (n)")
@@ -712,9 +790,15 @@ def _cmd_browse(app: AppContext, args: list[str], *, limit: int) -> None:
         try:
             raw = Prompt.ask(f"[brand]browse[/] ({prompt})", default="q", show_default=False)
         except (EOFError, KeyboardInterrupt):
+            if inline_layout:
+                _clear_content_area(app, banner_rows)
+                _write_control(app.console, f"\x1b[{banner_rows + 1};1H")
             return
         raw = raw.strip().lower()
         if raw in {"q", "quit", "exit"}:
+            if inline_layout:
+                _clear_content_area(app, banner_rows)
+                _write_control(app.console, f"\x1b[{banner_rows + 1};1H")
             return
         if raw in {"n", "next"} and page < total_pages - 1:
             page += 1

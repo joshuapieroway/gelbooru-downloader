@@ -41,7 +41,7 @@ max_downloads_per_run = 0
 
 [network]
 base_url = "https://gelbooru.com"
-user_agent = "GelbooruCLI/1.0"
+user_agent = "GelbooruCLI/1.1.1"
 api_key = "your_api_key"
 user_id = "1234"
 auth_mode = "params"

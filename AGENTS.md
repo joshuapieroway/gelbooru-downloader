@@ -67,12 +67,29 @@ Public API re-exports: `GelbooruClient`, `Downloader`, `Config` (see `__init__.p
 - **Secrets:** API keys are redacted in logs and `config show`; never print them.
 - **Per-file failure isolation:** one bad post never aborts a batch; errors are
   recorded in the summary and history.
+- **Interactive layout:** the banner uses a DECSTBM scroll region; kitty previews
+  are placed in explicit rectangles below it, and the content area is cleared
+  before each browse page and when browse exits.
 
 ## Configuration precedence
 
 `defaults < config file < environment variables (GELBOORU_*) < CLI options`.
 See `config.ENV_MAP` for the full env-var → dotted-key table and
 `AppPaths.discover` for platform directories (XDG on Linux).
+
+## Versioning
+
+`1.1.x` is the interactive-mode release line. The version is duplicated in:
+
+- `pyproject.toml` — `[project].version` (installed metadata; the CLI reads it)
+- `src/gelbooru_downloader/__init__.py` — fallback `__version__`
+- `src/gelbooru_downloader/config.py` — `NetworkConfig.user_agent` and `DEFAULT_CONFIG`
+- `src/gelbooru_downloader/downloader.py` — `DownloadOptions.user_agent`
+- `docs/configuration.md` — sample `[network] user_agent`
+- `CHANGELOG.md` — release entry
+
+After editing `pyproject.toml`, reinstall (`pip install -e .`) so
+`importlib.metadata` and `gelbooru version` see the bump.
 
 ## Testing
 
