@@ -32,14 +32,15 @@ this file in sync with `AGENTS.md`.
 
 ## P2 — Features
 
-- [ ] Support downloading by MD5 or filename template `{tags}` / `{score}`.
+- [x] Support downloading by MD5 or filename template `{tags}` / `{score}`
+      (added `{score}` and `{tags}` fields, plus `{index}` zero-padding).
 - [x] Add `gelbooru export` command reusing `export_posts` (also available
       through `search --format`).
 - [ ] Optional progress for multi-page searches (currently only downloads show
       progress).
 - [ ] Watch mode: persist seen post ids across runs (today it relies on the
       history database + skip-existing).
-- [ ] Add shell-completion installation instructions to the README.
+- [x] Add shell-completion installation instructions to the README.
 - [ ] Publish to PyPI / provide a `pipx` install path (currently venv-only).
 
 ## Recently completed
