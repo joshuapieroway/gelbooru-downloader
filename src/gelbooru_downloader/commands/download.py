@@ -170,6 +170,9 @@ def download(
     """Search Gelbooru and download every matching post."""
 
     app = get_context(ctx)
+    # Default to score sorting unless shuffle is requested
+    if not shuffle and order is None:
+        order = "score"
     request = _request_from_options(
         limit=limit,
         page=page,
@@ -204,7 +207,9 @@ def download(
         app.config.display.show_progress = False
 
     # Auto-detect sort order in tags and use index-based filenames
-    if request.filename_template is None and ("sort:" in tags.lower() or "order:" in tags.lower()):
+    if request.filename_template is None and (
+        request.order == "score" or "sort:" in tags.lower() or "order:" in tags.lower()
+    ):
         request.filename_template = "{index}_{id}"
 
     app.banner(f'downloading "{tags}"')
@@ -243,9 +248,7 @@ def _dry_run(app: Any, tags: str, request: DownloadRequest) -> None:
     if not outcome.posts:
         from ..console import warn
 
-        queries = plan_queries(
-            tags, ratings=request.ratings, exclude=request.exclude, order=request.order
-        )
+        queries = plan_queries(tags, ratings=request.ratings, exclude=request.exclude)
         warn(app.console, f"No posts matched '{' | '.join(queries)}'")
         return
     options = download_options(app, request)

@@ -75,7 +75,6 @@ def build_search_tags(
     *,
     ratings: Sequence[str] | None = None,
     exclude: Sequence[str] | None = None,
-    order: str | None = None,
 ) -> str:
     """Build the tag expression for a *single* API query.
 
@@ -98,10 +97,8 @@ def build_search_tags(
         negated = f"-{tag.lower()}"
         if negated not in parts:
             parts.append(negated)
-    if order:
-        order_tag = f"order:{order.strip()}"
-        if order_tag not in parts:
-            parts.append(order_tag)
+    # Note: order is applied client-side via sort_key, not as a tag.
+    # Adding order:xxx to the tags string causes Gelbooru to return 0 results.
     return " ".join(parts)
 
 
@@ -110,7 +107,6 @@ def plan_queries(
     *,
     ratings: Sequence[str] | None = None,
     exclude: Sequence[str] | None = None,
-    order: str | None = None,
 ) -> list[str]:
     """Expand CLI options into the API queries needed to express OR.
 
@@ -125,7 +121,7 @@ def plan_queries(
     """
 
     rating_values = dedupe_preserve_order(value.lower() for value in split_csv(ratings))
-    base = build_search_tags(tags, ratings=None, exclude=exclude, order=order)
+    base = build_search_tags(tags, ratings=None, exclude=exclude)
     if not rating_values:
         return [base]
     return [f"{base} rating:{rating}".strip() for rating in rating_values]
@@ -273,7 +269,7 @@ async def search_posts(
     by post id, then limited.
     """
 
-    plans = plan_queries(tags, ratings=ratings, exclude=exclude, order=order)
+    plans = plan_queries(tags, ratings=ratings, exclude=exclude)
     if len(plans) == 1:
         async with app.client() as client:
             return await collect_posts(
@@ -452,7 +448,9 @@ def execute_download(
 
     limit = resolve_limit(request.limit, app.config)
     # Auto-detect sort order in tags and use index-based filenames
-    if request.filename_template is None and ("sort:" in tags.lower() or "order:" in tags.lower()):
+    if request.filename_template is None and (
+        request.order == "score" or "sort:" in tags.lower() or "order:" in tags.lower()
+    ):
         request.filename_template = "{index}_{id}"
     outcome = run_search(
         app,
@@ -467,9 +465,7 @@ def execute_download(
         shuffle=request.shuffle,
         max_pages=request.max_pages,
     )
-    queries = plan_queries(
-        tags, ratings=request.ratings, exclude=request.exclude, order=request.order
-    )
+    queries = plan_queries(tags, ratings=request.ratings, exclude=request.exclude)
     if not outcome.posts:
         from ..console import warn
 

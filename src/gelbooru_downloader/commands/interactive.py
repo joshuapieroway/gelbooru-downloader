@@ -686,9 +686,15 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
     ratings = parsed.get("rating")
     exclude = parsed.get("exclude")
     filename = parsed.get("filename")
+    shuffle = "shuffle" in flags
+
+    # Default to score sorting unless shuffle is requested
+    sort_order = "score" if not shuffle else None
 
     # Auto-detect sort order in tags
-    if filename is None and ("sort:" in tags.lower() or "order:" in tags.lower()):
+    if filename is None and (
+        sort_order == "score" or "sort:" in tags.lower() or "order:" in tags.lower()
+    ):
         filename = "{index}_{id}"
 
     request = DownloadRequest(
@@ -702,6 +708,8 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
         ratings=ratings.split(",") if ratings else [],
         exclude=exclude.split(",") if exclude else [],
         filename_template=filename,
+        shuffle=shuffle,
+        order=sort_order,
     )
     with app.console.status(f"[brand]searching {tags}…", spinner="dots"):
         outcome = run_search(
@@ -710,6 +718,7 @@ def _cmd_download(app: AppContext, args: list[str], *, output: Path | None, limi
             limit=requested,
             ratings=request.ratings,
             exclude=request.exclude,
+            order=request.order,
             page_size=app.config.general.page_size,
         )
     if not outcome.posts:

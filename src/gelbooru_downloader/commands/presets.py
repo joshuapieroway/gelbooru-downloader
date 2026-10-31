@@ -179,6 +179,7 @@ def download_preset(
         ratings=tuple(rating or ()),
         exclude=tuple(exclude or ()),
         max_pages=max_pages,
+        order="score" if not shuffle else None,
     )
     app.banner(f"preset '{preset.name}' → {preset.tags}")
 
@@ -186,6 +187,9 @@ def download_preset(
         from ..app import resolve_limit
         from ._common import download_options, plan_queries, print_collect_preview, run_search
 
+        # Auto-detect sort order in tags and use index-based filenames
+        if request.filename_template is None:
+            request.filename_template = "{index}_{id}"
         effective = resolve_limit(request.limit, app.config)
         outcome = run_search(
             app,
@@ -193,6 +197,7 @@ def download_preset(
             limit=effective,
             ratings=request.ratings,
             exclude=request.exclude,
+            order=request.order,
             page=page,
             page_size=app.config.general.page_size,
             post_filter=request.post_filter(),

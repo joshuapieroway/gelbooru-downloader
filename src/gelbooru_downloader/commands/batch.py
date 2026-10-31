@@ -157,6 +157,7 @@ async def _download_line(app: Any, search: str, request: DownloadRequest) -> Dow
         limit=limit,
         ratings=request.ratings,
         exclude=request.exclude,
+        order="score",
         page=request.page,
         page_size=app.config.general.page_size,
         post_filter=request.post_filter(),
@@ -166,6 +167,9 @@ async def _download_line(app: Any, search: str, request: DownloadRequest) -> Dow
     if not outcome.posts:
         warn(app.console, f"no posts matched '{search}'")
         return DownloadSummary()
+    # Auto-detect sort order in tags and use index-based filenames
+    if request.filename_template is None:
+        request.filename_template = "{index}_{id}"
     return await download_posts(app, outcome.posts, request, title=f'Downloading "{search[:32]}"')
 
 

@@ -129,7 +129,7 @@ def search(
 
     app = get_context(ctx)
     app.banner("search")
-    queries = plan_queries(tags, ratings=rating, exclude=exclude, order=order)
+    queries = plan_queries(tags, ratings=rating, exclude=exclude)
     effective_limit = resolve_limit(limit or None, app.config)
     post_filter = build_filter_from_options(
         ratings=rating,
