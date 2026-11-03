@@ -1,0 +1,27 @@
+[api]
+base_url = "https://gelbooru.com"
+user_id = ""
+api_key = ""
+timeout = 30
+
+[downloads]
+directory = "~/Pictures/Gelbooru"
+concurrency = 16
+max_retries = 5
+resume = true
+validate_files = true
+skip_duplicates = true
+# bandwidth_limit = 1048576
+
+[search]
+default_rating = "safe"
+default_limit = 100
+page_size = 100
+
+[watch]
+enabled = false
+interval = 300
+
+[database]
+enabled = true
+# path = "~/.local/share/gelbooru-downloader/history.db"
