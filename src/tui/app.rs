@@ -13,7 +13,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table, Tabs};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table, TableState, Tabs,
+};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -89,6 +91,15 @@ impl AppState {
             prev_time: Instant::now(),
             speed_bps: 0.0,
             eta_secs: None,
+        }
+    }
+
+    /// Keep the search selection within the current page.  `usize` arithmetic
+    /// previously let the cursor drift past the final result, which made the
+    /// viewer open the last post while the highlight had already disappeared.
+    fn clamp_search_scroll(&mut self) {
+        if self.tab == 0 {
+            self.scroll = self.scroll.min(self.results.len().saturating_sub(1));
         }
     }
 }
@@ -219,6 +230,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                                                 let mut st = state2.lock().unwrap();
                                                 st.searching = false;
                                                 st.results = posts;
+                                                st.clamp_search_scroll();
                                                 st.search_total = total;
                                                 st.search_page = 1;
                                                 st.search_per_page = per_page;
@@ -262,7 +274,14 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                                     st.scroll = 0;
                                 }
                                 KeyCode::Down | KeyCode::Char('j') => {
-                                    st.scroll = st.scroll.saturating_add(1);
+                                    if st.tab == 0 {
+                                        st.scroll = st
+                                            .scroll
+                                            .saturating_add(1)
+                                            .min(st.results.len().saturating_sub(1));
+                                    } else {
+                                        st.scroll = st.scroll.saturating_add(1);
+                                    }
                                 }
                                 KeyCode::Up | KeyCode::Char('k') => {
                                     st.scroll = st.scroll.saturating_sub(1);
@@ -318,6 +337,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                                                     let mut st = state2.lock().unwrap();
                                                     st.searching = false;
                                                     st.results = posts;
+                                                    st.clamp_search_scroll();
                                                     st.search_total = total;
                                                     st.search_page = page;
                                                 });
@@ -350,6 +370,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                                                 let mut st = state2.lock().unwrap();
                                                 st.searching = false;
                                                 st.results = posts;
+                                                st.clamp_search_scroll();
                                                 st.search_total = total;
                                                 st.search_page = page;
                                             });
@@ -407,7 +428,10 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                         }
                         MouseEventKind::ScrollDown => {
                             if st.tab == 0 {
-                                st.scroll = st.scroll.saturating_add(3);
+                                st.scroll = st
+                                    .scroll
+                                    .saturating_add(3)
+                                    .min(st.results.len().saturating_sub(1));
                             }
                         }
                         _ => {}
@@ -439,7 +463,10 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("v0.1.0", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            concat!("v", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::raw("   "),
         Span::styled(
             "High-performance async image downloader",
@@ -509,6 +536,11 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         Constraint::Percentage(8),
         Constraint::Percentage(55),
     ];
+    let selected = if app.results.is_empty() {
+        None
+    } else {
+        Some(app.scroll.min(app.results.len() - 1))
+    };
 
     let rows: Vec<Row> = if app.searching {
         vec![Row::new(vec![
@@ -540,7 +572,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let style = if i == app.scroll.min(app.results.len().saturating_sub(1)) {
+                let style = if Some(i) == selected {
                     Style::default()
                         .bg(Color::Rgb(60, 60, 90))
                         .add_modifier(Modifier::BOLD)
@@ -593,7 +625,17 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 ))
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
-    f.render_widget(table, chunks[0]);
+    // Scroll the table viewport so the selected row stays visible, and clamp
+    // the offset at the final result so the table cannot scroll past the end
+    // of the current page.
+    let visible_rows = usize::from(chunks[0].height.saturating_sub(3)).max(1);
+    let offset = selected
+        .map(|s| s.saturating_sub(visible_rows.saturating_sub(1)))
+        .unwrap_or(0);
+    let mut table_state = TableState::default()
+        .with_selected(selected)
+        .with_offset(offset);
+    f.render_stateful_widget(table, chunks[0], &mut table_state);
 
     let input_style = if app.mode == Mode::SearchInput {
         Style::default().fg(Color::Yellow)
@@ -891,5 +933,31 @@ fn rating_color(r: &str) -> Color {
         "questionable" | "q" => Color::LightYellow,
         "explicit" | "e" | "nsfw" => Color::Red,
         _ => Color::Gray,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_scroll_cannot_pass_the_last_result() {
+        let mut app = AppState::new(None, None);
+        app.results = vec![Post::default(), Post::default(), Post::default()];
+        app.scroll = 99;
+
+        app.clamp_search_scroll();
+
+        assert_eq!(app.scroll, 2);
+    }
+
+    #[test]
+    fn search_scroll_is_zero_when_there_are_no_results() {
+        let mut app = AppState::new(None, None);
+        app.scroll = 7;
+
+        app.clamp_search_scroll();
+
+        assert_eq!(app.scroll, 0);
     }
 }
