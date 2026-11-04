@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-11-03
+
+Compare: [`v0.2.1...v0.2.2`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.1...v0.2.2)
+
+Concurrent CLI downloads with the same tag but different rating filters or output
+directories now appear as separate rows in the TUI Queue tab instead of merging.
+
+### Added
+
+- Per-job progress tracking: each download writes its own JSON record to
+  `data_dir()/progress/` instead of sharing a single `download_progress.json`,
+  preventing concurrent processes from overwriting each other.
+- `ProgressSnapshot::base_label()` now includes the rating filter, so identical
+  search queries with different rating sets remain distinct.
+- `ProgressSnapshot::output_name()` extracts the final path component for
+  disambiguation when labels collide.
+
+### Fixed
+
+- TUI Queue tab now renders each concurrent job as a separate row, identified
+  by tag, rating filter, and output directory.
+
 ## [0.2.1] - 2026-11-03
 
 Compare: [`v0.2.0...v0.2.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.0...v0.2.1)

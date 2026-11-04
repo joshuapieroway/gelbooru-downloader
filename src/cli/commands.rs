@@ -250,6 +250,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             engine.sort = sort.clone();
             engine.order = order.clone();
             engine.label = Some(target.clone());
+            engine.rating = rating.clone();
             // determine if target is id
             if let Ok(id) = target.parse::<i64>() {
                 let post = client.get_post(id).await?;

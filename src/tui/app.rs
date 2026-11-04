@@ -2,7 +2,7 @@ use crate::api::client::GelbooruClient;
 use crate::api::models::Post;
 use crate::config::Config;
 use crate::database::history::HistoryDb;
-use crate::utils::paths;
+use crate::downloader::progress::{self, ProgressSnapshot};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -29,6 +29,14 @@ enum Mode {
     SearchInput,
 }
 
+/// A single row in the Queue tab showing active download jobs.
+#[derive(Clone)]
+struct QueueJob {
+    snapshot: ProgressSnapshot,
+    speed_bps: f64,
+    eta_secs: Option<u64>,
+}
+
 struct AppState {
     tab: usize,
     mode: Mode,
@@ -46,18 +54,16 @@ struct AppState {
     search_page: usize,
     search_per_page: usize,
     search_total: i64,
-    prog_total: usize,
-    prog_completed: usize,
+    jobs: Vec<QueueJob>,
+    prog_bytes: u64,
     prog_failed: usize,
     prog_skipped: usize,
-    prog_label: String,
-    prog_bytes: u64,
-    prog_updated: i64,
+    prog_total: usize,
+    prog_completed: usize,
+    speed_bps: f64,
     prev_bytes: u64,
     prev_completed: usize,
     prev_time: Instant,
-    speed_bps: f64,
-    eta_secs: Option<u64>,
 }
 
 impl AppState {
@@ -79,18 +85,16 @@ impl AppState {
             search_page: 1,
             search_per_page: 50,
             search_total: 0,
-            prog_total: 0,
-            prog_completed: 0,
+            jobs: Vec::new(),
+            prog_bytes: 0,
             prog_failed: 0,
             prog_skipped: 0,
-            prog_label: "overall".to_string(),
-            prog_bytes: 0,
-            prog_updated: 0,
+            prog_total: 0,
+            prog_completed: 0,
+            speed_bps: 0.0,
             prev_bytes: 0,
             prev_completed: 0,
             prev_time: Instant::now(),
-            speed_bps: 0.0,
-            eta_secs: None,
         }
     }
 
@@ -136,58 +140,24 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                         st.history = h;
                     }
                 }
-                let p = paths::data_dir().join("download_progress.json");
-                if let Ok(txt) = std::fs::read_to_string(&p) {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
-                        st.prog_total =
-                            v.get("total").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                        st.prog_completed =
-                            v.get("completed").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                        st.prog_failed =
-                            v.get("failed").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                        st.prog_skipped =
-                            v.get("skipped").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                        st.prog_bytes = v.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0);
-                        st.prog_updated = v.get("updated_at").and_then(|x| x.as_i64()).unwrap_or(0);
-                        if let Some(l) = v.get("label").and_then(|x| x.as_str()) {
-                            st.prog_label = l.to_string();
-                        }
-                        let now = Instant::now();
-                        let dt = now.duration_since(st.prev_time).as_secs_f64();
-                        if dt >= 1.0 {
-                            let dbb = st.prog_bytes.saturating_sub(st.prev_bytes) as f64;
-                            st.speed_bps = dbb / dt;
-                            st.prev_bytes = st.prog_bytes;
-                            st.prev_completed = st.prog_completed;
-                            st.prev_time = now;
-                        }
-                        if st.prog_completed > 0 && st.prog_total > st.prog_completed {
-                            let rate = (st.prog_completed.saturating_sub(st.prev_completed).max(1))
-                                as f64
-                                / dt.max(1.0);
-                            if rate > 0.0 {
-                                st.eta_secs = Some(
-                                    ((st.prog_total - st.prog_completed) as f64 / rate) as u64,
-                                );
-                            }
-                        } else {
-                            st.eta_secs = None;
-                        }
-                    }
+                let snapshots = progress::read_snapshots();
+                st.jobs.clear();
+                let now = Instant::now();
+                let dt = now.duration_since(st.prev_time).as_secs_f64();
+                let mut total_bytes = 0u64;
+                for snap in snapshots {
+                    total_bytes += snap.bytes;
+                    st.jobs.push(QueueJob {
+                        snapshot: snap,
+                        speed_bps: 0.0,
+                        eta_secs: None,
+                    });
                 }
-                let now_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                if now_ts - st.prog_updated > 10 {
-                    st.prog_total = 0;
-                    st.prog_completed = 0;
-                    st.prog_failed = 0;
-                    st.prog_skipped = 0;
-                    st.prog_bytes = 0;
-                    st.prog_label = "overall".to_string();
-                    st.speed_bps = 0.0;
-                    st.eta_secs = None;
+                st.prog_bytes = total_bytes;
+                if dt >= 1.0 {
+                    let dbb = st.prog_bytes.saturating_sub(st.prev_bytes) as f64;
+                    st.prev_bytes = st.prog_bytes;
+                    st.prev_time = now;
                 }
                 st.last_poll = Instant::now();
             }
@@ -693,28 +663,8 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         Constraint::Percentage(15),
         Constraint::Percentage(15),
     ];
-    let rows: Vec<Row> = if app.prog_total > 0 {
-        vec![Row::new(vec![
-            Cell::from(app.prog_label.clone()),
-            Cell::from("downloading"),
-            Cell::from(format!(
-                "{}/{} ({}%)",
-                app.prog_completed,
-                app.prog_total,
-                (app.prog_completed * 100 / app.prog_total.max(1))
-            )),
-            Cell::from(if app.speed_bps > 0.0 {
-                format!("{:.1} MB/s", app.speed_bps / 1_048_576.0)
-            } else {
-                "n/a".to_string()
-            }),
-            Cell::from(
-                app.eta_secs
-                    .map(|e| format!("{}s", e))
-                    .unwrap_or_else(|| "n/a".to_string()),
-            ),
-        ])]
-    } else {
+
+    let rows: Vec<Row> = if app.jobs.is_empty() {
         vec![Row::new(vec![
             Cell::from("idle").style(Style::default().fg(Color::DarkGray)),
             Cell::from(""),
@@ -722,6 +672,43 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             Cell::from(""),
             Cell::from(""),
         ])]
+    } else {
+        app.jobs
+            .iter()
+            .map(|job| {
+                let s = &job.snapshot;
+                let tag_label = if let Some(out_name) = s.output_name() {
+                    format!("{} ({})", s.base_label(), out_name)
+                } else {
+                    s.base_label()
+                };
+                let status_str = if s.completed + s.failed + s.skipped >= s.total && s.total > 0 {
+                    "completed"
+                } else {
+                    "downloading"
+                };
+                let pct = if s.total > 0 {
+                    s.completed * 100 / s.total.max(1)
+                } else {
+                    0
+                };
+                Row::new(vec![
+                    Cell::from(tag_label),
+                    Cell::from(status_str),
+                    Cell::from(format!("{}/{} ({pct}%)", s.completed, s.total)),
+                    Cell::from(if job.speed_bps > 0.0 {
+                        format!("{:.1} MB/s", job.speed_bps / 1_048_576.0)
+                    } else {
+                        "n/a".to_string()
+                    }),
+                    Cell::from(
+                        job.eta_secs
+                            .map(|e| format!("{}s", e))
+                            .unwrap_or_else(|| "n/a".to_string()),
+                    ),
+                ])
+            })
+            .collect()
     };
 
     let table = Table::new(rows, widths)
@@ -741,18 +728,20 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title("Download Queue")
+                .title(format!("Download Queue ({})", app.jobs.len()))
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
     f.render_widget(table, chunks[0]);
 
-    let percent = if app.prog_total > 0 {
-        (app.prog_completed * 100 / app.prog_total.max(1)) as u16
+    let total_planned: usize = app.jobs.iter().map(|j| j.snapshot.total).sum();
+    let total_finished: usize = app.jobs.iter().map(|j| j.snapshot.completed).sum();
+    let percent = if total_planned > 0 {
+        (total_finished * 100 / total_planned.max(1)) as u16
     } else {
         0
     };
-    let label = if app.prog_total > 0 {
-        format!("{}/{}", app.prog_completed, app.prog_total)
+    let label = if total_planned > 0 {
+        format!("{}/{total_planned}", total_finished)
     } else {
         "idle".to_string()
     };

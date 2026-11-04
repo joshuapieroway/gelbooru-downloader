@@ -11,8 +11,7 @@ use indicatif::ProgressBar;
 use reqwest::Client;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -145,51 +144,7 @@ impl Default for DownloadQueue {
     }
 }
 
-pub struct ProgressTracker {
-    pub total: AtomicUsize,
-    pub completed: AtomicUsize,
-    pub failed: AtomicUsize,
-    pub skipped: AtomicUsize,
-    pub bytes: AtomicU64,
-    pub label: Mutex<String>,
-}
-
-impl ProgressTracker {
-    pub fn new() -> Self {
-        Self {
-            total: AtomicUsize::new(0),
-            completed: AtomicUsize::new(0),
-            failed: AtomicUsize::new(0),
-            skipped: AtomicUsize::new(0),
-            bytes: AtomicU64::new(0),
-            label: Mutex::new("download".to_string()),
-        }
-    }
-    pub fn reset(&self, total: usize) {
-        self.total.store(total, Ordering::Relaxed);
-        self.completed.store(0, Ordering::Relaxed);
-        self.failed.store(0, Ordering::Relaxed);
-        self.skipped.store(0, Ordering::Relaxed);
-        self.bytes.store(0, Ordering::Relaxed);
-        // label set by caller before reset ideally; leave as is
-    }
-    pub fn write_file(&self) {
-        let data = serde_json::json!({
-            "total": self.total.load(Ordering::Relaxed),
-            "completed": self.completed.load(Ordering::Relaxed),
-            "failed": self.failed.load(Ordering::Relaxed),
-            "skipped": self.skipped.load(Ordering::Relaxed),
-            "bytes": self.bytes.load(Ordering::Relaxed),
-            "label": self.label.lock().map(|g| g.clone()).unwrap_or_else(|_| "download".to_string()),
-            "updated_at": chrono::Utc::now().timestamp(),
-        });
-        let path = crate::utils::paths::data_dir().join("download_progress.json");
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, data.to_string());
-    }
-}
+use super::progress::ProgressTracker;
 
 #[derive(Clone)]
 pub struct DownloadEngine {
@@ -202,6 +157,7 @@ pub struct DownloadEngine {
     pub sort: Option<String>,
     pub order: Option<String>,
     pub label: Option<String>,
+    pub rating: Option<String>,
     pub progress: Arc<ProgressTracker>,
     pub queue: Option<Arc<DownloadQueue>>,
     /// Optional CLI progress bar advanced while response bytes stream in.
@@ -253,6 +209,7 @@ impl DownloadEngine {
             sort: None,
             order: None,
             label: None,
+            rating: None,
             progress: Arc::new(ProgressTracker::new()),
             queue,
             progress_bar: None,
@@ -821,9 +778,11 @@ impl DownloadEngine {
                 pb.set_message(format!("0/{total_files} files"));
             }
         }
-        if let Ok(mut g) = self.progress.label.lock() {
-            *g = self.label.clone().unwrap_or_else(|| "download".to_string());
-        }
+        self.progress.set_context(
+            self.label.clone(),
+            self.rating.clone(),
+            output_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+        );
         self.progress.reset(total_files);
         self.progress.write_file();
 
