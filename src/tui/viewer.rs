@@ -10,7 +10,9 @@ use crate::api::client::GelbooruClient;
 use crate::api::models::Post;
 use crate::config::Config;
 use crate::database::history::HistoryDb;
-use crate::downloader::engine::{DownloadEngine, DownloadOutcome, DownloadQueue};
+use crate::downloader::engine::{
+    DownloadEngine, DownloadEntry, DownloadOutcome, DownloadQueue, DownloadStatus,
+};
 use crate::utils::paths;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures::StreamExt;
@@ -95,13 +97,19 @@ pub async fn show(
     let mut last_page = search_page.max(1);
     let mut at_end = false;
     let quick_dir = quick_download_dir(cfg);
-    let cfg = cfg.clone();
 
-    // Shared download queue for showing multiple pending/ongoing downloads
+    // Shared download queue for showing multiple pending/ongoing downloads.
     let queue = Arc::new(DownloadQueue::new());
+    // One engine for every viewer download: clones share the HTTP client, the
+    // semaphore and the queue, so concurrent downloads respect
+    // `downloads.concurrency` instead of each starting its own engine.
+    let engine = DownloadEngine::with_queue(cfg.clone(), db.clone(), Some(queue.clone()));
 
     // Track active download handles so we can check completion
     let mut active_downloads: Vec<tokio::task::JoinHandle<DownloadOutcome>> = Vec::new();
+
+    // Refreshed while the viewer is idle so multiple downloads stay visible.
+    let mut downloads_summary: String;
 
     // Previews for the neighbouring posts are fetched in the background so
     // stepping through the gallery rarely has to wait on the network.
@@ -122,8 +130,10 @@ pub async fn show(
         // The queue is updated directly by the DownloadEngine
         active_downloads.retain(|h| !h.is_finished());
 
-        // Get current download queue entries for display
-        let queue_entries = futures::executor::block_on(queue.entries());
+        // Get current download queue entries for display. The footer refreshes
+        // this while the viewer is idle, so several downloads stay visible.
+        let queue_entries = queue.entries().await;
+        downloads_summary = format_download_progress(&active_download_entries(&queue_entries));
 
         let kind = media_kind(post);
         let cached_path = preview_path(post);
@@ -161,7 +171,15 @@ pub async fn show(
             };
 
             // Show the loading card before the (possibly slow) download.
-            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+            let _ = draw(
+                terminal,
+                &all_posts,
+                index,
+                &phase,
+                tags_scroll,
+                &status,
+                &downloads_summary,
+            );
             clear_images();
 
             match load_preview(post, prefetched.remove(&post.id)).await {
@@ -177,35 +195,33 @@ pub async fn show(
             }
         }
 
-        // Append download queue info if any active downloads with progress details
-        let downloading_entries: Vec<_> = queue_entries
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.status,
-                    crate::downloader::engine::DownloadStatus::Downloading
-                        | crate::downloader::engine::DownloadStatus::Queued
-                )
-            })
-            .collect();
-
-        if !downloading_entries.is_empty() {
-            let progress_info = format_download_progress(&downloading_entries);
-            status = format!("{} ({})", status, progress_info);
-        }
-
         // Draw the final state for this post, then place the image.  Keeping
         // drawing and placement in this order means the image never covers the
         // loading/error panel and ratatui can cleanly erase old messages.
-        let (mut last_img_rect, mut max_tags_scroll) =
-            draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+        let (mut last_img_rect, mut max_tags_scroll) = draw(
+            terminal,
+            &all_posts,
+            index,
+            &phase,
+            tags_scroll,
+            &status,
+            &downloads_summary,
+        );
 
         if let (Phase::Ready, Some(path)) = (&phase, &preview) {
             if let Err(e) = place_image(post, path, last_img_rect) {
                 clear_images();
                 phase = Phase::Error(e);
                 status = "Preview could not be displayed".to_string();
-                let (_, m) = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                let (_, m) = draw(
+                    terminal,
+                    &all_posts,
+                    index,
+                    &phase,
+                    tags_scroll,
+                    &status,
+                    &downloads_summary,
+                );
                 max_tags_scroll = m;
             }
         }
@@ -221,13 +237,44 @@ pub async fn show(
         }
 
         loop {
-            let ev = match event::read() {
-                Ok(ev) => ev,
+            let ev = match event::poll(Duration::from_millis(100)) {
+                Ok(true) => match event::read() {
+                    Ok(ev) => Some(ev),
+                    Err(_) => {
+                        clear_images();
+                        terminal.clear().ok();
+                        return;
+                    }
+                },
+                Ok(false) => None,
                 Err(_) => {
                     clear_images();
                     terminal.clear().ok();
                     return;
                 }
+            };
+
+            let Some(ev) = ev else {
+                // Refresh download progress while the viewer is idle so
+                // several active downloads remain visible.
+                active_downloads.retain(|h| !h.is_finished());
+                if !downloads_summary.is_empty() {
+                    let entries = queue.entries().await;
+                    let summary = format_download_progress(&active_download_entries(&entries));
+                    if summary != downloads_summary {
+                        downloads_summary = summary;
+                        let _ = draw(
+                            terminal,
+                            &all_posts,
+                            index,
+                            &phase,
+                            tags_scroll,
+                            &status,
+                            &downloads_summary,
+                        );
+                    }
+                }
+                continue;
             };
 
             match ev {
@@ -263,6 +310,7 @@ pub async fn show(
                                         &phase,
                                         tags_scroll,
                                         &status,
+                                        &downloads_summary,
                                     );
 
                                     match load_page(client, &query, search_per_page, prev).await {
@@ -298,6 +346,7 @@ pub async fn show(
                                         &phase,
                                         tags_scroll,
                                         &status,
+                                        &downloads_summary,
                                     );
                                     continue 'gallery;
                                 } else {
@@ -309,6 +358,7 @@ pub async fn show(
                                         &phase,
                                         tags_scroll,
                                         &status,
+                                        &downloads_summary,
                                     );
                                 }
                             }
@@ -334,6 +384,7 @@ pub async fn show(
                                         &phase,
                                         tags_scroll,
                                         &status,
+                                        &downloads_summary,
                                     );
 
                                     match load_page(client, &query, search_per_page, next).await {
@@ -366,6 +417,7 @@ pub async fn show(
                                         &phase,
                                         tags_scroll,
                                         &status,
+                                        &downloads_summary,
                                     );
                                     continue 'gallery;
                                 } else {
@@ -377,42 +429,97 @@ pub async fn show(
                                         &phase,
                                         tags_scroll,
                                         &status,
+                                        &downloads_summary,
                                     );
                                 }
                             } else {
                                 status = end_status(search_total, all_posts.len());
-                                let _ =
-                                    draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                                let _ = draw(
+                                    terminal,
+                                    &all_posts,
+                                    index,
+                                    &phase,
+                                    tags_scroll,
+                                    &status,
+                                    &downloads_summary,
+                                );
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
                             let new = tags_scroll.saturating_sub(1);
                             if new != tags_scroll || max_tags_scroll > 0 {
                                 tags_scroll = new;
-                                let _ =
-                                    draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                                let _ = draw(
+                                    terminal,
+                                    &all_posts,
+                                    index,
+                                    &phase,
+                                    tags_scroll,
+                                    &status,
+                                    &downloads_summary,
+                                );
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             let new = (tags_scroll + 1).min(max_tags_scroll);
                             tags_scroll = new;
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
+                            );
                         }
                         KeyCode::PageUp => {
                             tags_scroll = tags_scroll.saturating_sub(6);
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
+                            );
                         }
                         KeyCode::PageDown => {
                             tags_scroll = (tags_scroll + 6).min(max_tags_scroll);
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
+                            );
                         }
                         KeyCode::Home => {
                             tags_scroll = 0;
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
+                            );
                         }
                         KeyCode::End => {
                             tags_scroll = max_tags_scroll;
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
+                            );
                         }
                         KeyCode::Char('c') => {
                             if copy_to_clipboard(&post.id.to_string()) {
@@ -421,7 +528,15 @@ pub async fn show(
                                 status =
                                     "Clipboard unavailable (install wl-copy or xclip)".to_string();
                             }
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
+                            );
                         }
                         KeyCode::Char('t') => {
                             if copy_to_clipboard(&post.tags) {
@@ -430,7 +545,15 @@ pub async fn show(
                                 status =
                                     "Clipboard unavailable (install wl-copy or xclip)".to_string();
                             }
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
+                            );
                         }
                         KeyCode::Char('o') => {
                             match open_post(post) {
@@ -439,35 +562,49 @@ pub async fn show(
                                 }
                                 Err(e) => status = e,
                             }
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
+                            );
                         }
                         KeyCode::Char('d') => {
-                            // Queue the download to run in background without blocking
-                            let target = quick_dir.clone();
-                            let queue_clone = queue.clone();
+                            if queue.is_active(post.id).await {
+                                status = format!("Post #{} is already downloading", post.id);
+                            } else {
+                                // Queue the download; clones of the shared
+                                // engine enforce the configured concurrency
+                                // limit across every queued post.
+                                queue.add_queued(post.id).await;
+                                let entries = queue.entries().await;
+                                downloads_summary =
+                                    format_download_progress(&active_download_entries(&entries));
 
-                            // Register in queue first
-                            futures::executor::block_on(queue_clone.add_queued(post.id));
+                                status = format!("Queued download for post #{}...", post.id);
 
-                            // Create engine with queue for progress updates
-                            let engine = DownloadEngine::with_queue(
-                                cfg.clone(),
-                                db.clone(),
-                                Some(queue_clone),
+                                let target = quick_dir.clone();
+                                let download_post = post.clone();
+                                let worker = engine.clone();
+                                let handle = tokio::spawn(async move {
+                                    worker.download_post(download_post, Some(target)).await
+                                });
+
+                                // Track the active download
+                                active_downloads.push(handle);
+                            }
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                tags_scroll,
+                                &status,
+                                &downloads_summary,
                             );
-
-                            status = format!("Queued download for post #{}...", post.id);
-                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
-
-                            let download_post = post.clone();
-
-                            // Spawn download in background
-                            let handle = tokio::spawn(async move {
-                                engine.download_post(download_post, Some(target)).await
-                            });
-
-                            // Track the active download
-                            active_downloads.push(handle);
                         }
                         _ => {}
                     }
@@ -480,12 +617,28 @@ pub async fn show(
                     };
                     if new != tags_scroll {
                         tags_scroll = new;
-                        let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                        let _ = draw(
+                            terminal,
+                            &all_posts,
+                            index,
+                            &phase,
+                            tags_scroll,
+                            &status,
+                            &downloads_summary,
+                        );
                     }
                 }
                 Event::Resize(_, _) => {
                     clear_images();
-                    let out = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                    let out = draw(
+                        terminal,
+                        &all_posts,
+                        index,
+                        &phase,
+                        tags_scroll,
+                        &status,
+                        &downloads_summary,
+                    );
                     last_img_rect = out.0;
                     max_tags_scroll = out.1;
                     if let (Phase::Ready, Some(path)) = (&phase, &preview) {
@@ -581,6 +734,7 @@ fn draw(
     phase: &Phase,
     tags_scroll: u16,
     status: &str,
+    downloads: &str,
 ) -> (Rect, u16) {
     let mut img_rect = Rect::default();
     let mut max_scroll = 0u16;
@@ -595,7 +749,7 @@ fn draw(
         img_rect = out.0;
         let tag_out = draw_details_and_tags(f, post, reg.details, reg.tags, tags_scroll);
         max_scroll = tag_out;
-        draw_footer(f, phase, status, reg.status, reg.hints);
+        draw_footer(f, phase, status, downloads, reg.status, reg.hints);
     });
 
     (img_rect, max_scroll)
@@ -784,6 +938,7 @@ fn draw_footer(
     f: &mut ratatui::Frame,
     phase: &Phase,
     status: &str,
+    downloads: &str,
     status_area: Rect,
     hints_area: Rect,
 ) {
@@ -793,10 +948,11 @@ fn draw_footer(
         Phase::Error(_) => (Color::Red, "Preview unavailable"),
         Phase::Unsupported(_) => (Color::Yellow, "Media preview not supported"),
     };
-    let text = if status.trim().is_empty() {
-        fallback
-    } else {
-        status
+    let text = match (status.trim().is_empty(), downloads.trim().is_empty()) {
+        (true, true) => fallback.to_string(),
+        (true, false) => downloads.to_string(),
+        (false, true) => status.to_string(),
+        (false, false) => format!("{status}  ·  {downloads}"),
     };
 
     f.render_widget(
@@ -1616,11 +1772,22 @@ fn open_post(post: &Post) -> Result<(), String> {
         .map_err(|e| format!("Could not open browser: {e}"))
 }
 
+/// Entries that are still queued or actively downloading.
+fn active_download_entries(entries: &[DownloadEntry]) -> Vec<&DownloadEntry> {
+    entries
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.status,
+                DownloadStatus::Queued | DownloadStatus::Downloading
+            )
+        })
+        .collect()
+}
+
 /// Format download progress for display in the status bar.
 /// Shows progress for up to 3 downloads, then truncates with count.
-fn format_download_progress(entries: &[&crate::downloader::engine::DownloadEntry]) -> String {
-    use crate::downloader::engine::DownloadStatus;
-
+fn format_download_progress(entries: &[&DownloadEntry]) -> String {
     let mut parts = Vec::new();
     for e in entries.iter().take(3) {
         let progress_str = match e.status {
@@ -1765,7 +1932,7 @@ mod tests {
                         draw_header(f, &posts[0], 0, 1, reg.header);
                         let _ = draw_image_block(f, &posts[0], &phase, reg.image);
                         let _ = draw_details_and_tags(f, &posts[0], reg.details, reg.tags, 3);
-                        draw_footer(f, &phase, "Ready", reg.status, reg.hints);
+                        draw_footer(f, &phase, "Ready", "", reg.status, reg.hints);
                     })
                     .unwrap();
             }
@@ -1874,6 +2041,52 @@ mod tests {
 
         let (path, _) = load_preview(&post, Some(task)).await.unwrap();
         assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn download_progress_lists_multiple_active_entries() {
+        let entries = vec![
+            DownloadEntry {
+                post_id: 1,
+                status: DownloadStatus::Downloading,
+                progress: 50,
+                total: 100,
+                bytes: 50,
+                error: None,
+            },
+            DownloadEntry {
+                post_id: 2,
+                status: DownloadStatus::Queued,
+                progress: 0,
+                total: 0,
+                bytes: 0,
+                error: None,
+            },
+            DownloadEntry {
+                post_id: 3,
+                status: DownloadStatus::Downloading,
+                progress: 25,
+                total: 100,
+                bytes: 25,
+                error: None,
+            },
+            DownloadEntry {
+                post_id: 4,
+                status: DownloadStatus::Completed,
+                progress: 100,
+                total: 100,
+                bytes: 100,
+                error: None,
+            },
+        ];
+
+        let active = active_download_entries(&entries);
+        assert_eq!(active.len(), 3);
+        let summary = format_download_progress(&active);
+        assert!(summary.contains("#1: 50%"));
+        assert!(summary.contains("#2: queued"));
+        assert!(summary.contains("#3: 25%"));
+        assert!(!summary.contains("#4:"));
     }
 
     #[tokio::test]

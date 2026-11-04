@@ -45,7 +45,8 @@ open the full-screen viewer. In the viewer:
 
 Quick downloads go to a dedicated subfolder (default
 `~/Pictures/Gelbooru/quick-downloads/`) and are recorded in history like any
-other download.
+other download. Pressing `d` on several posts queues them concurrently, up to
+`downloads.concurrency` (default 16); progress stays visible in the footer.
 
 ## Configuration
 

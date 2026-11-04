@@ -70,6 +70,17 @@ impl DownloadQueue {
         entries.len() - 1
     }
 
+    /// Whether `post_id` is queued or currently downloading.
+    pub async fn is_active(&self, post_id: i64) -> bool {
+        self.entries.lock().await.iter().any(|e| {
+            e.post_id == post_id
+                && matches!(
+                    e.status,
+                    DownloadStatus::Queued | DownloadStatus::Downloading
+                )
+        })
+    }
+
     pub async fn set_status(&self, post_id: i64, status: DownloadStatus) {
         let mut entries = self.entries.lock().await;
         for e in entries.iter_mut() {
@@ -96,10 +107,13 @@ impl DownloadQueue {
         for e in entries.iter_mut() {
             if e.post_id == post_id {
                 e.error = error.clone();
-                e.status = match (e.status, &error) {
-                    (DownloadStatus::Downloading, Some(_)) => DownloadStatus::Failed,
-                    _ => e.status,
-                };
+                if let Some(message) = &error {
+                    e.status = if message == "cancelled" {
+                        DownloadStatus::Cancelled
+                    } else {
+                        DownloadStatus::Failed
+                    };
+                }
                 break;
             }
         }
@@ -107,6 +121,10 @@ impl DownloadQueue {
 
     pub async fn len(&self) -> usize {
         self.entries.lock().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.entries.lock().await.is_empty()
     }
 
     pub async fn entries(&self) -> Vec<DownloadEntry> {
@@ -248,11 +266,6 @@ impl DownloadEngine {
     pub async fn download_post(&self, post: Post, output_dir: Option<PathBuf>) -> DownloadOutcome {
         let post_id = post.id;
 
-        // Register in download queue if available
-        if let Some(queue) = &self.queue {
-            queue.set_status(post_id, DownloadStatus::Downloading).await;
-        }
-
         let _permit = match self.semaphore.acquire().await {
             Ok(p) => p,
             Err(_) => {
@@ -283,6 +296,12 @@ impl DownloadEngine {
                 skipped: false,
                 error: Some("cancelled".into()),
             };
+        }
+
+        // Only report "downloading" once a concurrency slot is held; entries
+        // waiting for a slot stay queued instead of looking active.
+        if let Some(queue) = &self.queue {
+            queue.set_status(post_id, DownloadStatus::Downloading).await;
         }
 
         let dir = output_dir.unwrap_or_else(|| self.config.download_dir());
@@ -863,5 +882,54 @@ impl DownloadEngine {
             pb.finish_with_message(format!("{total_files}/{total_files} files"));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queue_tracks_multiple_active_downloads() {
+        let queue = DownloadQueue::new();
+        assert!(queue.is_empty().await);
+
+        queue.add_queued(1).await;
+        queue.add_queued(2).await;
+        assert_eq!(queue.len().await, 2);
+        assert!(queue.is_active(1).await);
+        assert!(queue.is_active(2).await);
+
+        queue.set_status(1, DownloadStatus::Downloading).await;
+        queue.set_status(2, DownloadStatus::Completed).await;
+        assert!(queue.is_active(1).await);
+        assert!(!queue.is_active(2).await);
+    }
+
+    #[tokio::test]
+    async fn queue_errors_become_terminal_states() {
+        let queue = DownloadQueue::new();
+        queue.add_queued(1).await;
+        queue.add_queued(2).await;
+
+        queue.set_error(1, Some("HTTP 500".into())).await;
+        queue.set_error(2, Some("cancelled".into())).await;
+
+        let entries = queue.entries().await;
+        assert_eq!(entries[0].status, DownloadStatus::Failed);
+        assert_eq!(entries[1].status, DownloadStatus::Cancelled);
+        assert!(!queue.is_active(1).await);
+        assert!(!queue.is_active(2).await);
+    }
+
+    #[test]
+    fn cloned_engines_share_the_queue_and_concurrency_limit() {
+        let queue = Arc::new(DownloadQueue::new());
+        let engine = DownloadEngine::with_queue(Config::default(), None, Some(queue.clone()));
+        let clone = engine.clone();
+
+        assert!(Arc::ptr_eq(&engine.semaphore, &clone.semaphore));
+        assert!(Arc::ptr_eq(engine.queue.as_ref().unwrap(), &queue));
+        assert!(Arc::ptr_eq(clone.queue.as_ref().unwrap(), &queue));
     }
 }

@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-11-03
+
+Compare: [`v0.2.0...v0.2.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.0...v0.2.1)
+
+A follow-up fix for the TUI download queue: several posts can be queued at
+once, the configured concurrency is enforced across all of them, and progress
+stays visible while the viewer is idle.
+
+### Fixed
+
+- The TUI viewer now shares one download engine across queued posts, so
+  concurrent downloads respect `downloads.concurrency` instead of each
+  starting an independent engine and client.
+- Download progress refreshes while the viewer is idle, so multiple active
+  downloads remain visible without pressing a key.
+- Posts stay marked as queued until a concurrency slot is available; only
+  active transfers show as downloading.
+- Pressing `d` on a post that is already queued or downloading no longer
+  starts a duplicate download.
+- Queue errors now always resolve to a terminal `failed` or `cancelled` state.
+
 ## [0.2.0] - 2026-11-03
 
 Compare: [`v0.1.2...v0.2.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.1.2...v0.2.0)
