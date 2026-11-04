@@ -6,6 +6,7 @@
 //! alternate screen, so returning to the search results is instant and the
 //! search page/scroll position/query are preserved.
 
+use crate::api::client::GelbooruClient;
 use crate::api::models::Post;
 use crate::config::Config;
 use crate::database::history::HistoryDb;
@@ -54,28 +55,42 @@ enum Phase {
 /// Show the viewer starting at `start` in `posts`.
 ///
 /// The caller keeps its own search state untouched; this function only draws on
-/// the alternate screen and cleans the images up before returning.  Pressing
-/// `d` downloads the current post into `<download dir>/quick-downloads/` using
-/// the regular download engine, so history and duplicate handling stay intact.
+/// the alternate screen and cleans the images up before returning.  The viewer
+/// allows navigation past the bounds of `posts` to fetch adjacent pages from the
+/// API, enabling indefinite browsing through the search results.
+/// Pressing `d` downloads the current post into `<download dir>/quick-downloads/`
+/// using the regular download engine, so history and duplicate handling stay intact.
 pub async fn show(
     terminal: &mut TuiTerminal,
     posts: &[Post],
     start: usize,
     cfg: &Config,
     db: Option<Arc<HistoryDb>>,
+    client: Option<GelbooruClient>,
+    query: String,
+    search_per_page: usize,
+    search_page: usize,
+    search_total: i64,
 ) {
     if posts.is_empty() {
         return;
     }
 
     let mut index = start.min(posts.len() - 1);
+    let mut all_posts: Vec<Post> = posts.to_vec();
+    // The caller hands us exactly one page of results (the one the search tab
+    // is showing), so the loaded range starts out as a single page.  Pressing
+    // left/right past the ends fetches adjacent pages, in either direction.
+    let mut first_page = search_page.max(1);
+    let mut last_page = search_page.max(1);
+    let mut at_end = false;
     let quick_dir = quick_download_dir(cfg);
     let quick_label = friendly_path(&quick_dir);
     let cfg = cfg.clone();
     terminal.clear().ok();
 
     'gallery: loop {
-        let post = &posts[index];
+        let post = &all_posts[index];
         let mut tags_scroll: u16 = 0;
         let mut phase;
         let mut status;
@@ -116,7 +131,7 @@ pub async fn show(
             status = "Downloading full-resolution preview...".to_string();
 
             // Show the loading card before the (possibly slow) download.
-            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
             clear_images();
 
             match fetch_preview(post).await {
@@ -136,14 +151,14 @@ pub async fn show(
         // drawing and placement in this order means the image never covers the
         // loading/error panel and ratatui can cleanly erase old messages.
         let (mut last_img_rect, mut max_tags_scroll) =
-            draw(terminal, posts, index, &phase, tags_scroll, &status);
+            draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
 
         if let (Phase::Ready, Some(path)) = (&phase, &preview) {
             if let Err(e) = place_image(post, path, last_img_rect) {
                 clear_images();
                 phase = Phase::Error(e);
                 status = "Preview could not be displayed".to_string();
-                let (_, m) = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                let (_, m) = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                 max_tags_scroll = m;
             }
         }
@@ -178,43 +193,176 @@ pub async fn show(
                                 index -= 1;
                                 continue 'gallery;
                             }
+                            // Already at the first post - fetch the previous
+                            // page so browsing is not limited to one page.
+                            if first_page > 1 {
+                                if let Some(client) = &client {
+                                    let prev = first_page - 1;
+                                    status = format!("Loading page {}...", prev);
+                                    let _ = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        tags_scroll,
+                                        &status,
+                                    );
+
+                                    match load_page(client, &query, search_per_page, prev).await {
+                                        Ok(new_posts) => {
+                                            if new_posts.is_empty() {
+                                                status = "No previous page".to_string();
+                                            } else {
+                                                // Prepend the previous page's
+                                                // posts and step one to the
+                                                // left: onto its last post.
+                                                let prev_len = new_posts.len();
+                                                let mut full_posts = new_posts;
+                                                full_posts.append(&mut all_posts);
+                                                all_posts = full_posts;
+                                                first_page = prev;
+                                                index = prev_len - 1;
+                                                tags_scroll = 0;
+                                                status = loaded_status(
+                                                    search_total,
+                                                    first_page,
+                                                    all_posts.len(),
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            status = format!("Couldn't load previous page: {e}")
+                                        }
+                                    }
+                                    let _ = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        tags_scroll,
+                                        &status,
+                                    );
+                                    continue 'gallery;
+                                } else {
+                                    status = "Beginning of results".to_string();
+                                    let _ = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        tags_scroll,
+                                        &status,
+                                    );
+                                }
+                            }
                         }
                         KeyCode::Right
                         | KeyCode::Char('l')
                         | KeyCode::Char('n')
                         | KeyCode::Char(' ') => {
-                            if index + 1 < posts.len() {
+                            if index + 1 < all_posts.len() {
                                 index += 1;
                                 continue 'gallery;
+                            }
+                            // At the last post - fetch the next page unless we
+                            // already know there is nothing beyond it.
+                            if !at_end {
+                                if let Some(client) = &client {
+                                    let next = last_page + 1;
+                                    status = format!("Loading page {}...", next);
+                                    let _ = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        tags_scroll,
+                                        &status,
+                                    );
+
+                                    match load_page(client, &query, search_per_page, next).await {
+                                        Ok(new_posts) => {
+                                            if new_posts.is_empty() {
+                                                at_end = true;
+                                                status = end_status(search_total, all_posts.len());
+                                            } else {
+                                                // Append the next page's posts
+                                                // and step one to the right:
+                                                // onto its first post.
+                                                let new_index = all_posts.len();
+                                                all_posts.extend(new_posts);
+                                                last_page = next;
+                                                index = new_index;
+                                                tags_scroll = 0;
+                                                status = loaded_status(
+                                                    search_total,
+                                                    last_page,
+                                                    all_posts.len(),
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            status = format!("Couldn't load more posts: {e}")
+                                        }
+                                    }
+                                    let _ = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        tags_scroll,
+                                        &status,
+                                    );
+                                    continue 'gallery;
+                                } else {
+                                    status = end_status(search_total, all_posts.len());
+                                    let _ = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        tags_scroll,
+                                        &status,
+                                    );
+                                }
+                            } else {
+                                status = end_status(search_total, all_posts.len());
+                                let _ = draw(
+                                    terminal,
+                                    &all_posts,
+                                    index,
+                                    &phase,
+                                    tags_scroll,
+                                    &status,
+                                );
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
                             let new = tags_scroll.saturating_sub(1);
                             if new != tags_scroll || max_tags_scroll > 0 {
                                 tags_scroll = new;
-                                let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                                let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             let new = (tags_scroll + 1).min(max_tags_scroll);
                             tags_scroll = new;
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::PageUp => {
                             tags_scroll = tags_scroll.saturating_sub(6);
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::PageDown => {
                             tags_scroll = (tags_scroll + 6).min(max_tags_scroll);
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::Home => {
                             tags_scroll = 0;
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::End => {
                             tags_scroll = max_tags_scroll;
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::Char('c') => {
                             if copy_to_clipboard(&post.id.to_string()) {
@@ -223,7 +371,7 @@ pub async fn show(
                                 status =
                                     "Clipboard unavailable (install wl-copy or xclip)".to_string();
                             }
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::Char('t') => {
                             if copy_to_clipboard(&post.tags) {
@@ -232,7 +380,7 @@ pub async fn show(
                                 status =
                                     "Clipboard unavailable (install wl-copy or xclip)".to_string();
                             }
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::Char('o') => {
                             match open_post(post) {
@@ -241,7 +389,7 @@ pub async fn show(
                                 }
                                 Err(e) => status = e,
                             }
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::Char('d') => {
                             // Run the download in the background and keep polling
@@ -252,7 +400,7 @@ pub async fn show(
                             let download_post = post.clone();
 
                             status = format!("Downloading post #{} to {}...", post.id, quick_label);
-                            let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                            let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
 
                             let handle = tokio::spawn(async move {
                                 engine.download_post(download_post, Some(target)).await
@@ -284,7 +432,7 @@ pub async fn show(
                                     };
                                     status = quick_download_status(&outcome);
                                     let _ =
-                                        draw(terminal, posts, index, &phase, tags_scroll, &status);
+                                        draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                                     break;
                                 }
 
@@ -388,12 +536,12 @@ pub async fn show(
                     };
                     if new != tags_scroll {
                         tags_scroll = new;
-                        let _ = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                        let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                     }
                 }
                 Event::Resize(_, _) => {
                     clear_images();
-                    let out = draw(terminal, posts, index, &phase, tags_scroll, &status);
+                    let out = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                     last_img_rect = out.0;
                     max_tags_scroll = out.1;
                     if let (Phase::Ready, Some(path)) = (&phase, &preview) {
@@ -1308,6 +1456,42 @@ fn resolve_url(base: &str, location: &str) -> String {
         .and_then(|b| b.join(location).ok())
         .map(|u| u.to_string())
         .unwrap_or_else(|| location.to_string())
+}
+
+/// Fetch one page of search results.  Used by the viewer to grow the loaded
+/// window in either direction.
+async fn load_page(
+    client: &GelbooruClient,
+    query: &str,
+    per_page: usize,
+    page: usize,
+) -> Result<Vec<Post>, String> {
+    client
+        .search_page(query, per_page as u32, page as u32, None, None)
+        .await
+        .map(|(posts, _)| posts)
+        .map_err(|e| e.to_string())
+}
+
+/// Human-readable status line after loading an adjacent page: the total
+/// result count when the API reports one, otherwise just the window size.
+fn loaded_status(total: i64, page: usize, shown: usize) -> String {
+    if total > 0 {
+        format!(
+            "Loaded page {page} - {shown} of {total} shown"
+        )
+    } else {
+        format!("Loaded page {page} - {shown} shown")
+    }
+}
+
+/// Status line for the "nothing more in this direction" case.
+fn end_status(total: i64, shown: usize) -> String {
+    if total > 0 {
+        format!("End of results - {shown} of {total} shown")
+    } else {
+        format!("End of results - {shown} shown")
+    }
 }
 
 fn copy_to_clipboard(text: &str) -> bool {

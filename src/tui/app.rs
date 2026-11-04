@@ -402,6 +402,11 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                                         let idx = st.scroll.min(st.results.len().saturating_sub(1));
                                         let posts = st.results.clone();
                                         let db = st.db.clone();
+                                        let client = st.client.clone();
+                                        let query = st.query.clone();
+                                        let search_per_page = st.search_per_page;
+                                        let search_page = st.search_page;
+                                        let search_total = st.search_total;
                                         drop(st);
                                         crate::tui::viewer::show(
                                             &mut terminal,
@@ -409,6 +414,11 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                                             idx,
                                             &cfg,
                                             db,
+                                            client,
+                                            query,
+                                            search_per_page,
+                                            search_page,
+                                            search_total,
                                         )
                                         .await;
                                     }
