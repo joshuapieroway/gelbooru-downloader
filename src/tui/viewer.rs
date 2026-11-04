@@ -10,7 +10,7 @@ use crate::api::client::GelbooruClient;
 use crate::api::models::Post;
 use crate::config::Config;
 use crate::database::history::HistoryDb;
-use crate::downloader::engine::{DownloadEngine, DownloadOutcome};
+use crate::downloader::engine::{DownloadEngine, DownloadOutcome, DownloadQueue};
 use crate::utils::paths;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures::StreamExt;
@@ -20,12 +20,16 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 
 type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -36,6 +40,13 @@ const MUTED: Color = Color::Rgb(140, 150, 168);
 const TAG: Color = Color::Rgb(184, 196, 212);
 const MAX_PREVIEW_BYTES: u64 = 128 * 1024 * 1024;
 const ICAT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How many previews may download in the background at once.
+const PREFETCH_CONCURRENCY: usize = 3;
+/// Upper bound on queued/finished prefetch handles kept around.
+const MAX_PREFETCH_TASKS: usize = 6;
+
+type PreviewTask = JoinHandle<Result<(PathBuf, bool), String>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MediaKind {
@@ -58,8 +69,7 @@ enum Phase {
 /// the alternate screen and cleans the images up before returning.  The viewer
 /// allows navigation past the bounds of `posts` to fetch adjacent pages from the
 /// API, enabling indefinite browsing through the search results.
-/// Pressing `d` downloads the current post into `<download dir>/quick-downloads/`
-/// using the regular download engine, so history and duplicate handling stay intact.
+/// Pressing `d` queues downloads that show progress in the status area.
 pub async fn show(
     terminal: &mut TuiTerminal,
     posts: &[Post],
@@ -85,26 +95,42 @@ pub async fn show(
     let mut last_page = search_page.max(1);
     let mut at_end = false;
     let quick_dir = quick_download_dir(cfg);
-    let quick_label = friendly_path(&quick_dir);
     let cfg = cfg.clone();
+
+    // Shared download queue for showing multiple pending/ongoing downloads
+    let queue = Arc::new(DownloadQueue::new());
+
+    // Track active download handles so we can check completion
+    let mut active_downloads: Vec<tokio::task::JoinHandle<DownloadOutcome>> = Vec::new();
+
+    // Previews for the neighbouring posts are fetched in the background so
+    // stepping through the gallery rarely has to wait on the network.
+    let prefetch_permits = Arc::new(Semaphore::new(PREFETCH_CONCURRENCY));
+    let mut prefetched: HashMap<i64, PreviewTask> = HashMap::new();
+
     terminal.clear().ok();
 
     'gallery: loop {
         let post = &all_posts[index];
         let mut tags_scroll: u16 = 0;
         let mut phase;
-        let mut status;
+        #[allow(unused_assignments)]
+        let mut status = String::new();
         let mut preview: Option<PathBuf> = None;
+
+        // Check for completed downloads - just clean up finished handles
+        // The queue is updated directly by the DownloadEngine
+        active_downloads.retain(|h| !h.is_finished());
+
+        // Get current download queue entries for display
+        let queue_entries = futures::executor::block_on(queue.entries());
 
         let kind = media_kind(post);
         let cached_path = preview_path(post);
         // Only static images are previewed. Videos and animated GIFs get a
         // clear explanation instead of being handed to an external decoder.
         let previewable = is_previewable(kind);
-        let cached = previewable
-            && std::fs::metadata(&cached_path)
-                .map(|m| m.is_file() && m.len() > 0)
-                .unwrap_or(false);
+        let cached = previewable && preview_is_cached(&cached_path);
 
         if !previewable {
             // Videos and unknown file types are never handed to kitty: show a
@@ -112,15 +138,9 @@ pub async fn show(
             clear_images();
             phase = Phase::Unsupported(match kind {
                 MediaKind::Video => "Video files cannot be previewed in the terminal.".to_string(),
-                MediaKind::Gif => "Animated GIFs are not previewed in the terminal.".to_string(),
                 _ => "This file type cannot be previewed in the terminal.".to_string(),
             });
-            status = match kind {
-                MediaKind::Gif => {
-                    "GIF preview disabled - press o to open the post on Gelbooru".to_string()
-                }
-                _ => "Not previewable - press o to open the post on Gelbooru".to_string(),
-            };
+            status = "Not previewable - press o to open the post on Gelbooru".to_string();
         } else if cached {
             clear_images();
             phase = Phase::Ready;
@@ -128,14 +148,24 @@ pub async fn show(
             preview = Some(cached_path.clone());
         } else {
             phase = Phase::Loading;
-            status = "Downloading full-resolution preview...".to_string();
+            let is_sample = should_use_sample(post);
+            let quality_warning = is_quality_warning_needed(post);
+            status = if is_sample {
+                if quality_warning {
+                    "Downloading preview (sample - press d for full-resolution)...".to_string()
+                } else {
+                    "Downloading preview (sample)...".to_string()
+                }
+            } else {
+                "Downloading full-resolution preview...".to_string()
+            };
 
             // Show the loading card before the (possibly slow) download.
             let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
             clear_images();
 
-            match fetch_preview(post).await {
-                Ok(path) => {
+            match load_preview(post, prefetched.remove(&post.id)).await {
+                Ok((path, _is_sample)) => {
                     preview = Some(path.clone());
                     phase = Phase::Ready;
                     status = ready_status(post, &path);
@@ -145,6 +175,23 @@ pub async fn show(
                     status = "Could not download preview".to_string();
                 }
             }
+        }
+
+        // Append download queue info if any active downloads with progress details
+        let downloading_entries: Vec<_> = queue_entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.status,
+                    crate::downloader::engine::DownloadStatus::Downloading
+                        | crate::downloader::engine::DownloadStatus::Queued
+                )
+            })
+            .collect();
+
+        if !downloading_entries.is_empty() {
+            let progress_info = format_download_progress(&downloading_entries);
+            status = format!("{} ({})", status, progress_info);
         }
 
         // Draw the final state for this post, then place the image.  Keeping
@@ -161,6 +208,16 @@ pub async fn show(
                 let (_, m) = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                 max_tags_scroll = m;
             }
+        }
+
+        // Warm the adjacent previews while the user studies this image.
+        // Finished handles are pruned first so slots stay available.
+        prefetched.retain(|_, handle| !handle.is_finished());
+        if index > 0 {
+            spawn_prefetch(&all_posts[index - 1], &mut prefetched, &prefetch_permits);
+        }
+        if index + 1 < all_posts.len() {
+            spawn_prefetch(&all_posts[index + 1], &mut prefetched, &prefetch_permits);
         }
 
         loop {
@@ -300,9 +357,7 @@ pub async fn show(
                                                 );
                                             }
                                         }
-                                        Err(e) => {
-                                            status = format!("Couldn't load more posts: {e}")
-                                        }
+                                        Err(e) => status = format!("Couldn't load more posts: {e}"),
                                     }
                                     let _ = draw(
                                         terminal,
@@ -326,21 +381,16 @@ pub async fn show(
                                 }
                             } else {
                                 status = end_status(search_total, all_posts.len());
-                                let _ = draw(
-                                    terminal,
-                                    &all_posts,
-                                    index,
-                                    &phase,
-                                    tags_scroll,
-                                    &status,
-                                );
+                                let _ =
+                                    draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
                             let new = tags_scroll.saturating_sub(1);
                             if new != tags_scroll || max_tags_scroll > 0 {
                                 tags_scroll = new;
-                                let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
+                                let _ =
+                                    draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
@@ -392,138 +442,32 @@ pub async fn show(
                             let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
                         }
                         KeyCode::Char('d') => {
-                            // Run the download in the background and keep polling
-                            // input, so a slow transfer never freezes the viewer.
+                            // Queue the download to run in background without blocking
                             let target = quick_dir.clone();
-                            let engine = DownloadEngine::new(cfg.clone(), db.clone());
-                            let cancel = engine.cancel.clone();
-                            let download_post = post.clone();
+                            let queue_clone = queue.clone();
 
-                            status = format!("Downloading post #{} to {}...", post.id, quick_label);
+                            // Register in queue first
+                            futures::executor::block_on(queue_clone.add_queued(post.id));
+
+                            // Create engine with queue for progress updates
+                            let engine = DownloadEngine::with_queue(
+                                cfg.clone(),
+                                db.clone(),
+                                Some(queue_clone),
+                            );
+
+                            status = format!("Queued download for post #{}...", post.id);
                             let _ = draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
 
+                            let download_post = post.clone();
+
+                            // Spawn download in background
                             let handle = tokio::spawn(async move {
                                 engine.download_post(download_post, Some(target)).await
                             });
-                            let started = Instant::now();
-                            let mut last_secs = 0u64;
-                            let mut cancel_deadline: Option<Instant> = None;
 
-                            loop {
-                                if handle.is_finished() {
-                                    let outcome = match handle.await {
-                                        Ok(outcome) => outcome,
-                                        Err(e) => {
-                                            status = if e.is_cancelled() {
-                                                "Download cancelled".to_string()
-                                            } else {
-                                                format!("Download failed: {e}")
-                                            };
-                                            let _ = draw(
-                                                terminal,
-                                                posts,
-                                                index,
-                                                &phase,
-                                                tags_scroll,
-                                                &status,
-                                            );
-                                            break;
-                                        }
-                                    };
-                                    status = quick_download_status(&outcome);
-                                    let _ =
-                                        draw(terminal, &all_posts, index, &phase, tags_scroll, &status);
-                                    break;
-                                }
-
-                                // Give the engine a moment to notice
-                                // cancellation, then abort if it is stuck in
-                                // a stalled network read.
-                                if let Some(deadline) = cancel_deadline {
-                                    if Instant::now() >= deadline {
-                                        handle.abort();
-                                        status = "Download cancelled".to_string();
-                                        let _ = draw(
-                                            terminal,
-                                            posts,
-                                            index,
-                                            &phase,
-                                            tags_scroll,
-                                            &status,
-                                        );
-                                        break;
-                                    }
-                                }
-
-                                if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                                    match event::read() {
-                                        Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
-                                            let ctrl_c =
-                                                k.modifiers.contains(KeyModifiers::CONTROL)
-                                                    && matches!(k.code, KeyCode::Char('c'));
-                                            if ctrl_c {
-                                                cancel.cancel();
-                                                handle.abort();
-                                                clear_images();
-                                                terminal.clear().ok();
-                                                return;
-                                            }
-                                            if matches!(k.code, KeyCode::Esc | KeyCode::Char('q'))
-                                                && cancel_deadline.is_none()
-                                            {
-                                                cancel.cancel();
-                                                cancel_deadline =
-                                                    Some(Instant::now() + Duration::from_secs(2));
-                                                status = "Cancelling download...".to_string();
-                                                let _ = draw(
-                                                    terminal,
-                                                    posts,
-                                                    index,
-                                                    &phase,
-                                                    tags_scroll,
-                                                    &status,
-                                                );
-                                            }
-                                        }
-                                        Ok(Event::Resize(_, _)) => {
-                                            clear_images();
-                                            let out = draw(
-                                                terminal,
-                                                posts,
-                                                index,
-                                                &phase,
-                                                tags_scroll,
-                                                &status,
-                                            );
-                                            last_img_rect = out.0;
-                                            max_tags_scroll = out.1;
-                                            if let (Phase::Ready, Some(path)) = (&phase, &preview) {
-                                                let _ = place_image(post, path, last_img_rect);
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
-                                if cancel_deadline.is_none() {
-                                    let secs = started.elapsed().as_secs();
-                                    if secs != last_secs {
-                                        last_secs = secs;
-                                        status = format!(
-                                            "Downloading post #{} to {}... {}s",
-                                            post.id, quick_label, secs
-                                        );
-                                        let _ = draw(
-                                            terminal,
-                                            posts,
-                                            index,
-                                            &phase,
-                                            tags_scroll,
-                                            &status,
-                                        );
-                                    }
-                                }
-                            }
+                            // Track the active download
+                            active_downloads.push(handle);
                         }
                         _ => {}
                     }
@@ -1148,7 +1092,37 @@ fn media_kind(post: &Post) -> MediaKind {
 }
 
 fn is_previewable(kind: MediaKind) -> bool {
-    matches!(kind, MediaKind::Image)
+    matches!(kind, MediaKind::Image | MediaKind::Gif)
+}
+
+/// Determine which URL to use for preview.
+///
+/// Gelbooru provides:
+/// - preview_url: ~200px thumbnail (INSTANT loading)
+/// - sample_url: ~1000px max dimension (FAST loading)
+/// - file_url: full resolution
+///
+/// FAST strategy with 60% minimum quality:
+/// - Images <= 1667px: sample would be >= 60%, use full for best quality
+/// - Images > 1667px: sample would be < 60%, use sample for FAST loading
+///   and show warning that 'd' key downloads full resolution
+fn should_use_sample(post: &Post) -> bool {
+    let max_dim = post.width.max(post.height);
+
+    // Use full resolution for small images - download is fast, quality is good
+    if max_dim <= 1667 {
+        return false;
+    }
+
+    // Use sample for larger images - ensures FAST loading even for huge files
+    // Sample at 1000px for a 3000px image = 33% - but still FAST
+    // User can press 'd' to get full resolution
+    true
+}
+
+fn is_quality_warning_needed(post: &Post) -> bool {
+    let max_dim = post.width.max(post.height);
+    max_dim > 1667
 }
 
 fn display_ext(post: &Post) -> String {
@@ -1179,6 +1153,90 @@ fn preview_size(post: &Post) -> u64 {
         }
     }
     post.file_size.max(0) as u64
+}
+
+/// A cached preview is any non-empty regular file.  Downloads are written to a
+/// unique temporary file and atomically renamed, so readers never observe a
+/// partially-written preview.
+fn preview_is_cached(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Unique temporary path next to `target`, keeping the final rename atomic and
+/// allowing a background prefetch and an on-demand fetch to coexist safely.
+fn preview_tmp_path(target: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = target
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "preview".into());
+    name.push(format!(".{}.{seq}.part", std::process::id()));
+    target.with_file_name(name)
+}
+
+/// Shared HTTP client for previews.  Reusing it keeps TLS sessions and keep-
+/// alive connections warm, which is a large win when browsing image by image.
+fn preview_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    // These settings are fixed, so the builder cannot realistically fail; keep
+    // the error path anyway so the viewer reports it instead of panicking.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .user_agent("gelbooru-downloader/0.1")
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_max_idle_per_host(4)
+        .tcp_keepalive(Some(Duration::from_secs(10)))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let _ = CLIENT.set(client);
+    CLIENT
+        .get()
+        .ok_or_else(|| "HTTP client unavailable".to_string())
+}
+
+/// Resolve a preview, waiting for an in-flight prefetch when one exists instead
+/// of starting a duplicate request.
+async fn load_preview(
+    post: &Post,
+    pending: Option<PreviewTask>,
+) -> Result<(PathBuf, bool), String> {
+    if let Some(task) = pending {
+        match task.await {
+            Ok(Ok(path)) => return Ok(path),
+            Ok(Err(e)) => tracing::debug!("prefetch for post {} failed: {e}", post.id),
+            Err(e) => tracing::debug!("prefetch task for post {} failed: {e}", post.id),
+        }
+    }
+    fetch_preview(post).await
+}
+
+/// Spawn a bounded background download for `post` when it is previewable and
+/// not cached yet.
+fn spawn_prefetch(post: &Post, pending: &mut HashMap<i64, PreviewTask>, permits: &Arc<Semaphore>) {
+    if !is_previewable(media_kind(post))
+        || preview_is_cached(&preview_path(post))
+        || pending.contains_key(&post.id)
+        || pending.len() >= MAX_PREFETCH_TASKS
+    {
+        return;
+    }
+
+    let id = post.id;
+    let post = post.clone();
+    let permits = permits.clone();
+    pending.insert(
+        id,
+        tokio::spawn(async move {
+            let _permit = permits.acquire_owned().await.ok();
+            fetch_preview(&post).await
+        }),
+    );
 }
 
 fn ready_status(post: &Post, path: &Path) -> String {
@@ -1227,6 +1285,7 @@ fn friendly_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+#[allow(dead_code)]
 fn quick_download_status(outcome: &DownloadOutcome) -> String {
     if let Some(err) = &outcome.error {
         if err.to_ascii_lowercase().contains("cancel") {
@@ -1325,21 +1384,36 @@ fn clear_images() {
     }
 }
 
-async fn fetch_preview(post: &Post) -> Result<PathBuf, String> {
+async fn fetch_preview(post: &Post) -> Result<(PathBuf, bool), String> {
+    fetch_preview_to(post, &preview_path(post)).await
+}
+
+/// Download a preview into `target`.  Split out from `fetch_preview` so tests
+/// can use a temporary cache file.
+async fn fetch_preview_to(post: &Post, target: &Path) -> Result<(PathBuf, bool), String> {
+    // Returns (path, used_sample): used_sample indicates if preview is lower-res
+
     if post.file_url.trim().is_empty() {
         return Err("This post has no file URL".to_string());
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
-        .user_agent("gelbooru-downloader/0.1")
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+    // Determine which URL to use - prefer sample for large images to load faster
+    // Gelbooru provides: file_url (full), sample_url (~1000px), preview_url (thumbnail)
+    let file_url = if should_use_sample(post) {
+        if !post.sample_url.trim().is_empty() {
+            post.sample_url.clone()
+        } else {
+            post.file_url.clone()
+        }
+    } else {
+        post.file_url.clone()
+    };
+
+    let client = preview_client()?;
 
     // Gelbooru hotlink protection redirects to hotlink.php; follow manually so
     // the Referer header is preserved on every hop.
-    let mut url = post.file_url.clone();
+    let mut url = file_url.clone();
     let mut response = None;
     for _ in 0..8 {
         let resp = client
@@ -1393,22 +1467,21 @@ async fn fetch_preview(post: &Post) -> Result<PathBuf, String> {
         }
     }
 
-    let path = preview_path(post);
-    let dir = path
+    let dir = target
         .parent()
         .ok_or_else(|| "Invalid preview path".to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("Could not create preview cache: {e}"))?;
 
-    let tmp = path.with_extension("part");
+    let tmp = preview_tmp_path(target);
     let _ = std::fs::remove_file(&tmp);
 
     match stream_to_file(resp, &tmp).await {
         Ok(()) => {
-            std::fs::rename(&tmp, &path).map_err(|e| {
+            std::fs::rename(&tmp, target).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
                 format!("Could not save preview: {e}")
             })?;
-            Ok(path)
+            Ok((target.to_path_buf(), true)) // second value indicates this is a cached sample
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -1477,9 +1550,7 @@ async fn load_page(
 /// result count when the API reports one, otherwise just the window size.
 fn loaded_status(total: i64, page: usize, shown: usize) -> String {
     if total > 0 {
-        format!(
-            "Loaded page {page} - {shown} of {total} shown"
-        )
+        format!("Loaded page {page} - {shown} of {total} shown")
     } else {
         format!("Loaded page {page} - {shown} shown")
     }
@@ -1545,6 +1616,41 @@ fn open_post(post: &Post) -> Result<(), String> {
         .map_err(|e| format!("Could not open browser: {e}"))
 }
 
+/// Format download progress for display in the status bar.
+/// Shows progress for up to 3 downloads, then truncates with count.
+fn format_download_progress(entries: &[&crate::downloader::engine::DownloadEntry]) -> String {
+    use crate::downloader::engine::DownloadStatus;
+
+    let mut parts = Vec::new();
+    for e in entries.iter().take(3) {
+        let progress_str = match e.status {
+            DownloadStatus::Queued => "queued".to_string(),
+            DownloadStatus::Downloading => {
+                if e.total > 0 {
+                    format!(
+                        "{}% ({}/{})",
+                        e.progress,
+                        human_bytes(e.bytes),
+                        human_bytes(e.total)
+                    )
+                } else {
+                    format!("{}B", human_bytes(e.bytes))
+                }
+            }
+            DownloadStatus::Completed => "done".to_string(),
+            DownloadStatus::Failed => "failed".to_string(),
+            DownloadStatus::Cancelled => "cancelled".to_string(),
+        };
+        parts.push(format!("#{}: {}", e.post_id, progress_str));
+    }
+
+    if entries.len() > 3 {
+        parts.push(format!("(+{} more)", entries.len() - 3));
+    }
+
+    parts.join(", ")
+}
+
 fn rating_color(rating: &str) -> Color {
     match rating.to_lowercase().as_str() {
         "general" | "safe" | "s" => Color::Green,
@@ -1587,10 +1693,10 @@ mod tests {
     }
 
     #[test]
-    fn gif_is_blocked_with_a_specific_message() {
+    fn gifs_are_previewable_in_kitty() {
         let kind = media_kind(&post("https://img4.gelbooru.com/images/ab/cd/123.gif"));
         assert!(matches!(kind, MediaKind::Gif));
-        assert!(!is_previewable(kind));
+        assert!(is_previewable(kind));
     }
 
     #[test]
@@ -1726,5 +1832,78 @@ mod tests {
         let out = truncate_chars(s, 5);
         assert_eq!(out.chars().count(), 5);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_temp_paths_are_unique_and_beside_the_target() {
+        let target = Path::new("/tmp/previews/42_preview.jpg");
+        let a = preview_tmp_path(target);
+        let b = preview_tmp_path(target);
+        assert_ne!(a, b);
+        assert_ne!(a, target);
+        assert_eq!(a.parent(), target.parent());
+        assert!(a.to_string_lossy().ends_with(".part"));
+    }
+
+    #[test]
+    fn preview_cache_requires_a_non_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("42_preview.jpg");
+        assert!(!preview_is_cached(&path));
+        std::fs::write(&path, b"x").unwrap();
+        assert!(preview_is_cached(&path));
+    }
+
+    #[test]
+    fn preview_http_client_is_reused() {
+        let first = preview_client().unwrap();
+        let second = preview_client().unwrap();
+        assert!(std::ptr::eq(first, second));
+    }
+
+    #[tokio::test]
+    async fn load_preview_reuses_a_finished_prefetch() {
+        let mut post = Post::default();
+        post.id = 7;
+        post.file_url = "https://example.invalid/image.jpg".into();
+        let expected = PathBuf::from("/tmp/prefetched.jpg");
+        let task = tokio::spawn({
+            let path = expected.clone();
+            async move { Ok((path, true)) }
+        });
+
+        let (path, _) = load_preview(&post, Some(task)).await.unwrap();
+        assert_eq!(path, expected);
+    }
+
+    #[tokio::test]
+    async fn fetch_preview_writes_the_cache_file_atomically() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = b"\x89PNG\r\n\x1a\npreview-bytes".to_vec();
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(body.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("42_preview.png");
+        let mut post = Post::default();
+        post.id = 42;
+        post.file_url = format!("{}/image.png", server.uri());
+        post.width = 800;
+        post.height = 600;
+
+        let (path, _) = fetch_preview_to(&post, &target).await.unwrap();
+        assert_eq!(path, target);
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+        // Only the final file is left; the temporary file was renamed away.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

@@ -42,6 +42,47 @@ async fn downloads_file_atomically() {
 }
 
 #[tokio::test]
+async fn progress_bar_tracks_downloaded_bytes() {
+    let server = MockServer::start().await;
+    let bytes = png_bytes();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+        .mount(&server)
+        .await;
+    let mut cfg = Config::default();
+    cfg.api.base_url = server.uri();
+    cfg.downloads.validate_files = false;
+    cfg.downloads.resume = false;
+    cfg.downloads.skip_duplicates = false;
+    let dir = tempdir().unwrap();
+    cfg.downloads.directory = dir.path().to_string_lossy().to_string();
+    let db = Arc::new(HistoryDb::open_in_memory().unwrap());
+    let engine = DownloadEngine::new(cfg, Some(db));
+
+    let mut posts = Vec::new();
+    for i in 0..2 {
+        let mut post = Post::default();
+        post.id = 100 + i;
+        post.md5 = format!("hash{i}");
+        post.file_url = format!("{}/img{i}.png", server.uri());
+        post.file_size = bytes.len() as i64;
+        posts.push(post);
+    }
+
+    // A hidden bar still keeps length/position state, so we can assert on it
+    // without writing escape codes into the test output.
+    let pb = indicatif::ProgressBar::hidden();
+    let out = engine.download_many(posts, None, Some(pb.clone())).await;
+
+    assert_eq!(out.len(), 2);
+    assert!(out.iter().all(|o| o.error.is_none()), "{out:?}");
+    assert_eq!(pb.length(), Some(bytes.len() as u64 * 2));
+    // `finish` pins the position to the full length.
+    assert_eq!(pb.position(), bytes.len() as u64 * 2);
+    assert_eq!(pb.message(), "2/2 files");
+}
+
+#[tokio::test]
 async fn duplicate_post_skipped() {
     let server = MockServer::start().await;
     let bytes = png_bytes();

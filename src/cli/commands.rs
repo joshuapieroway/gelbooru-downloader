@@ -253,7 +253,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             // determine if target is id
             if let Ok(id) = target.parse::<i64>() {
                 let post = client.get_post(id).await?;
+                let pb = download_bytes_bar(post.file_size.max(0) as u64, 1);
+                engine.progress_bar = Some(pb.clone());
                 let o = engine.download_post(post, out_dir).await;
+                pb.finish_and_clear();
                 println!("{:?}", o);
             } else {
                 let params = search::SearchParams {
@@ -270,13 +273,17 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                     rules.ratings = crate::filters::rules::parse_ratings(r);
                 }
                 let posts = rules.filter_posts(posts);
-                let pb = ProgressBar::new(posts.len() as u64);
-                pb.set_style(ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                    .unwrap()
-                    .progress_chars("#>-"));
-                let outcomes = engine.download_many(posts, out_dir, Some(pb.clone())).await;
-                pb.finish_with_message("done");
+                let total_bytes: u64 = posts
+                    .iter()
+                    .filter(|p| p.file_size > 0)
+                    .map(|p| p.file_size as u64)
+                    .sum();
+                let pb = if total_bytes > 0 {
+                    download_bytes_bar(total_bytes, posts.len())
+                } else {
+                    download_count_bar(posts.len())
+                };
+                let outcomes = engine.download_many(posts, out_dir, Some(pb)).await;
                 let ok = outcomes
                     .iter()
                     .filter(|o| o.error.is_none() && !o.skipped)
@@ -387,7 +394,17 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                         let posts = search::search_all(&client, &cfg, &params).await?;
                         let posts = preset.to_filter_rules().filter_posts(posts);
                         let out_dir = preset.output_dir.as_ref().map(|d| paths::expand_tilde(d));
-                        let outcomes = engine.download_many(posts, out_dir, None).await;
+                        let total_bytes: u64 = posts
+                            .iter()
+                            .filter(|p| p.file_size > 0)
+                            .map(|p| p.file_size as u64)
+                            .sum();
+                        let pb = if total_bytes > 0 {
+                            download_bytes_bar(total_bytes, posts.len())
+                        } else {
+                            download_count_bar(posts.len())
+                        };
+                        let outcomes = engine.download_many(posts, out_dir, Some(pb)).await;
                         println!("Run '{}': {} downloads", name, outcomes.len());
                     } else {
                         println!("Preset not found.");
@@ -454,4 +471,52 @@ fn csv_writer(path: &PathBuf) -> anyhow::Result<std::fs::File> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(std::fs::File::create(path)?)
+}
+
+/// Spinner frames, ending in a check mark for the finished state.
+const SPINNER_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✔"];
+
+fn styled_progress_bar(len: u64, template: &str) -> ProgressBar {
+    let pb = ProgressBar::new(len);
+    pb.set_style(
+        ProgressStyle::with_template(template)
+            .expect("valid progress template")
+            .progress_chars("█░")
+            .tick_strings(SPINNER_TICKS),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(120));
+    pb
+}
+
+/// Byte-based bar used while downloading. Shows transferred bytes, total
+/// size, speed and the number of finished files.
+const BYTES_TEMPLATE: &str = "{spinner:.green} [{bar:24.cyan/blue}] {percent:>3}% {binary_bytes:>9}/{binary_total_bytes:>9} {binary_bytes_per_sec:>10} {msg}";
+
+/// File-count bar used when the API does not report any file sizes.
+const COUNT_TEMPLATE: &str =
+    "{spinner:.green} [{bar:24.cyan/blue}] {percent:>3}% {pos}/{len} files";
+
+fn download_bytes_bar(total_bytes: u64, total_files: usize) -> ProgressBar {
+    let pb = styled_progress_bar(total_bytes, BYTES_TEMPLATE);
+    pb.set_message(format!("0/{total_files} files"));
+    pb
+}
+
+fn download_count_bar(total_files: usize) -> ProgressBar {
+    let pb = styled_progress_bar(total_files as u64, COUNT_TEMPLATE);
+    pb.set_message("downloading");
+    pb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_bar_templates_are_valid() {
+        for template in [BYTES_TEMPLATE, COUNT_TEMPLATE] {
+            ProgressStyle::with_template(template)
+                .unwrap_or_else(|e| panic!("invalid template {template:?}: {e}"));
+        }
+    }
 }

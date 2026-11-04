@@ -53,7 +53,7 @@ fn default_dir() -> String {
     "~/Pictures/Gelbooru".to_string()
 }
 fn default_concurrency() -> usize {
-    8
+    16
 }
 fn default_retries() -> u32 {
     5

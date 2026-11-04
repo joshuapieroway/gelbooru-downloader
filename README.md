@@ -40,8 +40,8 @@ open the full-screen viewer. In the viewer:
 | `j` / `k` | scroll tags |
 | `c` / `t` | copy post ID / tags |
 | `o` | open the post on Gelbooru |
-| `d` | download to `<downloads.directory>/quick-downloads/` |
-| `Esc` | close the viewer, or cancel an in-progress quick download |
+| `d` | queue a download to `<downloads.directory>/quick-downloads/` |
+| `Esc` | close the viewer (queued downloads continue in the background) |
 
 Quick downloads go to a dedicated subfolder (default
 `~/Pictures/Gelbooru/quick-downloads/`) and are recorded in history like any
