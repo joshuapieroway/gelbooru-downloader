@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-11-04
+
+Compare: [`v0.2.2...v0.2.3`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.2...v0.2.3)
+
+A follow-up to the concurrent queue fix: live jobs stay in the Queue tab, and
+each row reports its own speed and ETA.
+
+### Added
+
+- The TUI Queue tab shows per-job transfer speed and ETA, derived from the
+  previous poll for that job's record.
+- Active downloads refresh their progress record every two seconds, so a long
+  transfer is no longer mistaken for an abandoned process and removed from the
+  queue after the 10-second stale timeout.
+- `ETA` values are formatted as `45s`, `1m 30s` or `2h 2m`.
+
+### Fixed
+
+- Queue tab statistics (`Live`, `Speed`, `Failed`, `Skipped`) update again
+  after per-job progress tracking replaced the shared record.
+- Finished jobs are dropped from the queue as soon as their progress record
+  disappears, without leaving stale speed or ETA values behind.
+
 ## [0.2.2] - 2026-11-03
 
 Compare: [`v0.2.1...v0.2.2`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.1...v0.2.2)

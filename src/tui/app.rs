@@ -16,6 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table, TableState, Tabs,
 };
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -35,6 +36,15 @@ struct QueueJob {
     snapshot: ProgressSnapshot,
     speed_bps: f64,
     eta_secs: Option<u64>,
+}
+
+/// The bytes and finished-file count seen for a job at the previous poll,
+/// used to derive per-job speed and ETA without mixing concurrent jobs.
+#[derive(Clone, Copy)]
+struct JobSample {
+    bytes: u64,
+    finished: usize,
+    at: Instant,
 }
 
 struct AppState {
@@ -61,9 +71,7 @@ struct AppState {
     prog_total: usize,
     prog_completed: usize,
     speed_bps: f64,
-    prev_bytes: u64,
-    prev_completed: usize,
-    prev_time: Instant,
+    job_samples: HashMap<String, JobSample>,
 }
 
 impl AppState {
@@ -92,10 +100,84 @@ impl AppState {
             prog_total: 0,
             prog_completed: 0,
             speed_bps: 0.0,
-            prev_bytes: 0,
-            prev_completed: 0,
-            prev_time: Instant::now(),
+            job_samples: HashMap::new(),
         }
+    }
+
+    /// Rebuild the Queue tab from the live progress records.
+    ///
+    /// Speed and ETA are derived from the previous poll for the same
+    /// `job_id`, so two downloads of the same tag never share numbers.
+    fn update_jobs(&mut self, snapshots: Vec<ProgressSnapshot>, now: Instant) {
+        let mut seen = HashSet::new();
+        let mut jobs = Vec::with_capacity(snapshots.len());
+        let mut total_bytes = 0u64;
+        let mut total_planned = 0usize;
+        let mut total_completed = 0usize;
+        let mut total_failed = 0usize;
+        let mut total_skipped = 0usize;
+        let mut total_speed = 0.0f64;
+
+        for snapshot in snapshots {
+            seen.insert(snapshot.job_id.clone());
+            let finished = snapshot.completed + snapshot.failed + snapshot.skipped;
+            let (speed_bps, eta_secs) = match self.job_samples.get(&snapshot.job_id) {
+                Some(prev) => {
+                    let elapsed = now.saturating_duration_since(prev.at).as_secs_f64();
+                    let transferred = snapshot.bytes.saturating_sub(prev.bytes);
+                    let done = finished.saturating_sub(prev.finished);
+                    let speed = if elapsed > 0.0 {
+                        transferred as f64 / elapsed
+                    } else {
+                        0.0
+                    };
+                    let rate = if elapsed > 0.0 {
+                        done as f64 / elapsed
+                    } else {
+                        0.0
+                    };
+                    let remaining = snapshot.total.saturating_sub(finished);
+                    let eta = if rate > 0.0 && remaining > 0 {
+                        Some((remaining as f64 / rate).ceil() as u64)
+                    } else {
+                        None
+                    };
+                    (speed, eta)
+                }
+                None => (0.0, None),
+            };
+
+            self.job_samples.insert(
+                snapshot.job_id.clone(),
+                JobSample {
+                    bytes: snapshot.bytes,
+                    finished,
+                    at: now,
+                },
+            );
+
+            total_bytes += snapshot.bytes;
+            total_planned += snapshot.total;
+            total_completed += snapshot.completed;
+            total_failed += snapshot.failed;
+            total_skipped += snapshot.skipped;
+            total_speed += speed_bps;
+
+            jobs.push(QueueJob {
+                snapshot,
+                speed_bps,
+                eta_secs,
+            });
+        }
+
+        self.job_samples.retain(|id, _| seen.contains(id));
+        self.jobs = jobs;
+        self.prog_bytes = total_bytes;
+        self.prog_total = total_planned;
+        self.prog_completed = total_completed;
+        self.prog_failed = total_failed;
+        self.prog_skipped = total_skipped;
+        self.speed_bps = total_speed;
     }
 
     /// Keep the search selection within the current page.  `usize` arithmetic
@@ -141,24 +223,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                     }
                 }
                 let snapshots = progress::read_snapshots();
-                st.jobs.clear();
-                let now = Instant::now();
-                let dt = now.duration_since(st.prev_time).as_secs_f64();
-                let mut total_bytes = 0u64;
-                for snap in snapshots {
-                    total_bytes += snap.bytes;
-                    st.jobs.push(QueueJob {
-                        snapshot: snap,
-                        speed_bps: 0.0,
-                        eta_secs: None,
-                    });
-                }
-                st.prog_bytes = total_bytes;
-                if dt >= 1.0 {
-                    let dbb = st.prog_bytes.saturating_sub(st.prev_bytes) as f64;
-                    st.prev_bytes = st.prog_bytes;
-                    st.prev_time = now;
-                }
+                st.update_jobs(snapshots, Instant::now());
                 st.last_poll = Instant::now();
             }
             st.tick = st.tick.wrapping_add(1);
@@ -649,6 +714,22 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     f.render_widget(input, chunks[1]);
 }
 
+fn queue_label(snapshot: &ProgressSnapshot) -> String {
+    if let Some(out_name) = snapshot.output_name() {
+        format!("{} ({})", snapshot.base_label(), out_name)
+    } else {
+        snapshot.base_label()
+    }
+}
+
+fn format_eta(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m {}s", secs / 60, secs % 60),
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
 fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -677,11 +758,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             .iter()
             .map(|job| {
                 let s = &job.snapshot;
-                let tag_label = if let Some(out_name) = s.output_name() {
-                    format!("{} ({})", s.base_label(), out_name)
-                } else {
-                    s.base_label()
-                };
+                let tag_label = queue_label(s);
                 let status_str = if s.completed + s.failed + s.skipped >= s.total && s.total > 0 {
                     "completed"
                 } else {
@@ -703,7 +780,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     }),
                     Cell::from(
                         job.eta_secs
-                            .map(|e| format!("{}s", e))
+                            .map(format_eta)
                             .unwrap_or_else(|| "n/a".to_string()),
                     ),
                 ])
@@ -938,6 +1015,160 @@ fn rating_color(r: &str) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(
+        job_id: &str,
+        rating: &str,
+        output: &str,
+        total: usize,
+        completed: usize,
+        bytes: u64,
+    ) -> ProgressSnapshot {
+        ProgressSnapshot {
+            job_id: job_id.to_string(),
+            label: "gilberta_(arknights)".to_string(),
+            rating: Some(rating.to_string()),
+            output: Some(output.to_string()),
+            total,
+            completed,
+            bytes,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn same_tag_with_different_ratings_stays_separate_in_queue() {
+        let mut app = AppState::new(None, None);
+        app.update_jobs(
+            vec![
+                snapshot("a", "general,sensitive", "/out/safe", 10, 2, 100),
+                snapshot("b", "explicit,questionable", "/out/nsfw", 20, 5, 200),
+            ],
+            Instant::now(),
+        );
+
+        assert_eq!(app.jobs.len(), 2);
+        assert_ne!(
+            queue_label(&app.jobs[0].snapshot),
+            queue_label(&app.jobs[1].snapshot)
+        );
+        assert!(queue_label(&app.jobs[0].snapshot).contains("general,sensitive"));
+        assert!(queue_label(&app.jobs[1].snapshot).contains("explicit,questionable"));
+        assert_eq!(app.prog_total, 30);
+        assert_eq!(app.prog_completed, 7);
+        assert_eq!(app.prog_bytes, 300);
+    }
+
+    #[test]
+    fn same_tag_and_rating_with_different_outputs_stays_separate_in_queue() {
+        let mut app = AppState::new(None, None);
+        app.update_jobs(
+            vec![
+                snapshot("a", "general", "/out/safe", 10, 1, 0),
+                snapshot("b", "general", "/out/backup", 10, 1, 0),
+            ],
+            Instant::now(),
+        );
+
+        assert_eq!(app.jobs.len(), 2);
+        assert_ne!(
+            queue_label(&app.jobs[0].snapshot),
+            queue_label(&app.jobs[1].snapshot)
+        );
+    }
+
+    #[test]
+    fn per_job_speed_and_eta_come_from_the_previous_poll() {
+        let mut app = AppState::new(None, None);
+        let start = Instant::now();
+        app.update_jobs(vec![snapshot("a", "general", "/out", 10, 0, 0)], start);
+
+        assert_eq!(app.jobs[0].speed_bps, 0.0);
+        assert!(app.jobs[0].eta_secs.is_none());
+
+        app.update_jobs(
+            vec![snapshot("a", "general", "/out", 10, 2, 2048)],
+            start + Duration::from_secs(2),
+        );
+
+        assert!((app.jobs[0].speed_bps - 1024.0).abs() < f64::EPSILON);
+        assert_eq!(app.jobs[0].eta_secs, Some(8));
+        assert!((app.speed_bps - 1024.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn finished_jobs_are_removed_from_the_queue() {
+        let mut app = AppState::new(None, None);
+        let now = Instant::now();
+        app.update_jobs(
+            vec![
+                snapshot("a", "general", "/out/a", 10, 0, 0),
+                snapshot("b", "explicit", "/out/b", 10, 0, 0),
+            ],
+            now,
+        );
+        assert_eq!(app.jobs.len(), 2);
+        assert_eq!(app.job_samples.len(), 2);
+
+        app.update_jobs(
+            vec![snapshot("a", "general", "/out/a", 10, 4, 4096)],
+            now + Duration::from_secs(1),
+        );
+
+        assert_eq!(app.jobs.len(), 1);
+        assert_eq!(app.jobs[0].snapshot.job_id, "a");
+        assert_eq!(app.job_samples.len(), 1);
+        assert!(app.job_samples.contains_key("a"));
+    }
+
+    #[test]
+    fn eta_formatting_is_human_readable() {
+        assert_eq!(format_eta(0), "0s");
+        assert_eq!(format_eta(45), "45s");
+        assert_eq!(format_eta(90), "1m 30s");
+        assert_eq!(format_eta(3_600), "1h 0m");
+        assert_eq!(format_eta(7_320), "2h 2m");
+    }
+
+    #[test]
+    fn queue_renders_one_row_per_concurrent_job() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = AppState::new(None, None);
+        app.update_jobs(
+            vec![
+                snapshot("a", "general,sensitive", "/out/safe", 10, 2, 100),
+                snapshot("b", "explicit,questionable", "/out/nsfw", 20, 5, 200),
+            ],
+            Instant::now(),
+        );
+
+        let backend = TestBackend::new(300, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                draw_queue(f, &app, area);
+            })
+            .unwrap();
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Download Queue (2)"));
+        assert!(
+            rendered.contains("gilberta_(arknights) [general,sensitive]"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("gilberta_(arknights) [explicit,questionable]"));
+        assert!(rendered.contains("(safe)"));
+        assert!(rendered.contains("(nsfw)"));
+    }
 
     #[test]
     fn search_scroll_cannot_pass_the_last_result() {

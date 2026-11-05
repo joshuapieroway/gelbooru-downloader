@@ -786,6 +786,20 @@ impl DownloadEngine {
         self.progress.reset(total_files);
         self.progress.write_file();
 
+        // Keep the record fresh while posts are in flight. A single large
+        // transfer can take longer than the TUI's staleness window, and
+        // without this heartbeat an active job would be dropped from the
+        // queue as if its process had died.
+        let heartbeat = {
+            let tracker = self.progress.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    tracker.write_file();
+                }
+            })
+        };
+
         // Workers share the bar so `download_file` can advance it while
         // chunks stream in, not just when a whole file is done.
         let mut engine = self.clone();
@@ -840,6 +854,8 @@ impl DownloadEngine {
         if let Some(pb) = &progress {
             pb.finish_with_message(format!("{total_files}/{total_files} files"));
         }
+        heartbeat.abort();
+        let _ = heartbeat.await;
         out
     }
 }
