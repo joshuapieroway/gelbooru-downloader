@@ -40,6 +40,9 @@ const LABEL: Color = Color::Rgb(112, 124, 146);
 const VALUE: Color = Color::Rgb(226, 232, 242);
 const MUTED: Color = Color::Rgb(140, 150, 168);
 const TAG: Color = Color::Rgb(184, 196, 212);
+/// Background behind the tag selected with `j`/`k`, so it stands out from the
+/// rest of the panel while keeping the category colour readable.
+const SELECTED_TAG_BG: Color = Color::Rgb(52, 74, 104);
 const MAX_PREVIEW_BYTES: u64 = 128 * 1024 * 1024;
 const ICAT_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -75,6 +78,67 @@ pub struct ViewerRequest {
     pub per_page: usize,
     pub page: usize,
     pub total: i64,
+}
+
+/// Cursor and scroll state for the tag panel.
+///
+/// `starts` maps each tag to the first line it occupies in the wrapped layout,
+/// which lets the panel keep the selected tag visible when navigating.
+#[derive(Default)]
+struct TagState {
+    selected: usize,
+    scroll: u16,
+    starts: Vec<usize>,
+    visible: usize,
+}
+
+impl TagState {
+    fn select_previous(&mut self, count: usize, step: usize) {
+        if count == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = self.selected.saturating_sub(step).min(count - 1);
+    }
+
+    fn select_next(&mut self, count: usize, step: usize) {
+        if count > 0 {
+            self.selected = self.selected.saturating_add(step).min(count - 1);
+        }
+    }
+
+    fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    fn select_last(&mut self, count: usize) {
+        self.selected = count.saturating_sub(1);
+    }
+
+    /// Update the cached layout and scroll just enough to keep the selected tag
+    /// on screen.
+    fn update_layout(&mut self, starts: Vec<usize>, visible: usize, max_scroll: u16) {
+        self.starts = starts;
+        self.visible = visible;
+
+        if self.starts.is_empty() {
+            self.selected = 0;
+            self.scroll = 0;
+            return;
+        }
+
+        self.selected = self.selected.min(self.starts.len() - 1);
+        if self.visible > 0 {
+            let start = self.starts[self.selected] as u16;
+            let visible = self.visible as u16;
+            if start < self.scroll {
+                self.scroll = start;
+            } else if start >= self.scroll.saturating_add(visible) {
+                self.scroll = start.saturating_sub(visible - 1);
+            }
+        }
+        self.scroll = self.scroll.min(max_scroll);
+    }
 }
 
 /// Show the viewer starting at `start` in `posts`.
@@ -134,7 +198,8 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
 
     'gallery: loop {
         let post = &all_posts[index];
-        let mut tags_scroll: u16 = 0;
+        let tag_count = post.tags.split_whitespace().count();
+        let mut tag_state = TagState::default();
         let mut phase;
         #[allow(unused_assignments)]
         let mut status = String::new();
@@ -194,7 +259,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                 &all_posts,
                 index,
                 &phase,
-                tags_scroll,
+                &mut tag_state,
                 &status,
                 &downloads_summary,
             );
@@ -216,12 +281,12 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
         // Draw the final state for this post, then place the image.  Keeping
         // drawing and placement in this order means the image never covers the
         // loading/error panel and ratatui can cleanly erase old messages.
-        let (mut last_img_rect, mut max_tags_scroll) = draw(
+        let mut last_img_rect = draw(
             terminal,
             &all_posts,
             index,
             &phase,
-            tags_scroll,
+            &mut tag_state,
             &status,
             &downloads_summary,
         );
@@ -231,16 +296,15 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                 clear_images();
                 phase = Phase::Error(e);
                 status = "Preview could not be displayed".to_string();
-                let (_, m) = draw(
+                draw(
                     terminal,
                     &all_posts,
                     index,
                     &phase,
-                    tags_scroll,
+                    &mut tag_state,
                     &status,
                     &downloads_summary,
                 );
-                max_tags_scroll = m;
             }
         }
 
@@ -296,7 +360,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                         &all_posts,
                         index,
                         &phase,
-                        tags_scroll,
+                        &mut tag_state,
                         &status,
                         &downloads_summary,
                     );
@@ -335,7 +399,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                         &all_posts,
                                         index,
                                         &phase,
-                                        tags_scroll,
+                                        &mut tag_state,
                                         &status,
                                         &downloads_summary,
                                     );
@@ -354,7 +418,6 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                                 all_posts = full_posts;
                                                 first_page = prev;
                                                 index = prev_len - 1;
-                                                tags_scroll = 0;
                                                 status = loaded_status(
                                                     search_total,
                                                     first_page,
@@ -371,7 +434,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                         &all_posts,
                                         index,
                                         &phase,
-                                        tags_scroll,
+                                        &mut tag_state,
                                         &status,
                                         &downloads_summary,
                                     );
@@ -383,7 +446,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                         &all_posts,
                                         index,
                                         &phase,
-                                        tags_scroll,
+                                        &mut tag_state,
                                         &status,
                                         &downloads_summary,
                                     );
@@ -409,7 +472,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                         &all_posts,
                                         index,
                                         &phase,
-                                        tags_scroll,
+                                        &mut tag_state,
                                         &status,
                                         &downloads_summary,
                                     );
@@ -427,7 +490,6 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                                 all_posts.extend(new_posts);
                                                 last_page = next;
                                                 index = new_index;
-                                                tags_scroll = 0;
                                                 status = loaded_status(
                                                     search_total,
                                                     last_page,
@@ -442,7 +504,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                         &all_posts,
                                         index,
                                         &phase,
-                                        tags_scroll,
+                                        &mut tag_state,
                                         &status,
                                         &downloads_summary,
                                     );
@@ -454,7 +516,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                         &all_posts,
                                         index,
                                         &phase,
-                                        tags_scroll,
+                                        &mut tag_state,
                                         &status,
                                         &downloads_summary,
                                     );
@@ -466,84 +528,80 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                     &all_posts,
                                     index,
                                     &phase,
-                                    tags_scroll,
+                                    &mut tag_state,
                                     &status,
                                     &downloads_summary,
                                 );
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            let new = tags_scroll.saturating_sub(1);
-                            if new != tags_scroll || max_tags_scroll > 0 {
-                                tags_scroll = new;
-                                let _ = draw(
-                                    terminal,
-                                    &all_posts,
-                                    index,
-                                    &phase,
-                                    tags_scroll,
-                                    &status,
-                                    &downloads_summary,
-                                );
-                            }
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let new = (tags_scroll + 1).min(max_tags_scroll);
-                            tags_scroll = new;
+                            tag_state.select_previous(tag_count, 1);
                             let _ = draw(
                                 terminal,
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
+                                &status,
+                                &downloads_summary,
+                            );
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            tag_state.select_next(tag_count, 1);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
                         }
                         KeyCode::PageUp => {
-                            tags_scroll = tags_scroll.saturating_sub(6);
+                            tag_state.select_previous(tag_count, 6);
                             let _ = draw(
                                 terminal,
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
                         }
                         KeyCode::PageDown => {
-                            tags_scroll = (tags_scroll + 6).min(max_tags_scroll);
+                            tag_state.select_next(tag_count, 6);
                             let _ = draw(
                                 terminal,
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
                         }
                         KeyCode::Home => {
-                            tags_scroll = 0;
+                            tag_state.select_first();
                             let _ = draw(
                                 terminal,
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
                         }
                         KeyCode::End => {
-                            tags_scroll = max_tags_scroll;
+                            tag_state.select_last(tag_count);
                             let _ = draw(
                                 terminal,
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
@@ -560,7 +618,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
@@ -577,7 +635,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
@@ -594,7 +652,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
@@ -630,7 +688,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                                 &all_posts,
                                 index,
                                 &phase,
-                                tags_scroll,
+                                &mut tag_state,
                                 &status,
                                 &downloads_summary,
                             );
@@ -639,19 +697,24 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                     }
                 }
                 Event::Mouse(m) => {
-                    let new = match m.kind {
-                        MouseEventKind::ScrollUp => tags_scroll.saturating_sub(3),
-                        MouseEventKind::ScrollDown => (tags_scroll + 3).min(max_tags_scroll),
-                        _ => tags_scroll,
+                    let moved = match m.kind {
+                        MouseEventKind::ScrollUp => {
+                            tag_state.select_previous(tag_count, 3);
+                            true
+                        }
+                        MouseEventKind::ScrollDown => {
+                            tag_state.select_next(tag_count, 3);
+                            true
+                        }
+                        _ => false,
                     };
-                    if new != tags_scroll {
-                        tags_scroll = new;
+                    if moved {
                         let _ = draw(
                             terminal,
                             &all_posts,
                             index,
                             &phase,
-                            tags_scroll,
+                            &mut tag_state,
                             &status,
                             &downloads_summary,
                         );
@@ -659,17 +722,15 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                 }
                 Event::Resize(_, _) => {
                     clear_images();
-                    let out = draw(
+                    last_img_rect = draw(
                         terminal,
                         &all_posts,
                         index,
                         &phase,
-                        tags_scroll,
+                        &mut tag_state,
                         &status,
                         &downloads_summary,
                     );
-                    last_img_rect = out.0;
-                    max_tags_scroll = out.1;
                     if let (Phase::Ready, Some(path)) = (&phase, &preview) {
                         let _ = place_image(post, path, last_img_rect);
                     }
@@ -761,12 +822,11 @@ fn draw(
     posts: &[Post],
     index: usize,
     phase: &Phase,
-    tags_scroll: u16,
+    tags: &mut TagState,
     status: &str,
     downloads: &str,
-) -> (Rect, u16) {
+) -> Rect {
     let mut img_rect = Rect::default();
-    let mut max_scroll = 0u16;
     let post = &posts[index];
 
     let _ = terminal.draw(|f| {
@@ -776,12 +836,11 @@ fn draw(
         draw_header(f, post, index, posts.len(), reg.header);
         let out = draw_image_block(f, post, phase, reg.image);
         img_rect = out.0;
-        let tag_out = draw_details_and_tags(f, post, reg.details, reg.tags, tags_scroll);
-        max_scroll = tag_out;
+        draw_details_and_tags(f, post, reg.details, reg.tags, tags);
         draw_footer(f, phase, status, downloads, reg.status, reg.hints);
     });
 
-    (img_rect, max_scroll)
+    img_rect
 }
 
 fn draw_header(f: &mut ratatui::Frame, post: &Post, index: usize, total: usize, area: Rect) {
@@ -909,8 +968,8 @@ fn draw_details_and_tags(
     post: &Post,
     details_area: Rect,
     tags_area: Rect,
-    tags_scroll: u16,
-) -> u16 {
+    tags: &mut TagState,
+) {
     // Details
     let details_block = Block::default()
         .borders(Borders::ALL)
@@ -951,16 +1010,22 @@ fn draw_details_and_tags(
     let tags_inner = tag_block.inner(tags_area);
     f.render_widget(tag_block, tags_area);
 
-    let lines = tag_lines(&post.tags, tags_inner.width.max(8) as usize);
+    let tag_count = post.tags.split_whitespace().count();
+    tags.selected = tags.selected.min(tag_count.saturating_sub(1));
+
+    let TagLayout { lines, starts } = tag_layout(
+        &post.tags,
+        tags_inner.width.max(8) as usize,
+        Some(tags.selected),
+    );
     let visible = tags_inner.height.max(1) as usize;
     let max_scroll = lines.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
-    let scroll = tags_scroll.min(max_scroll);
+    tags.update_layout(starts, visible, max_scroll);
+    let scroll = tags.scroll;
 
     if tags_inner.width > 0 && tags_inner.height > 0 {
         f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), tags_inner);
     }
-
-    max_scroll
 }
 
 fn draw_footer(
@@ -1005,7 +1070,7 @@ fn draw_footer(
             Span::styled("←/→", key),
             Span::styled(" nav   ", hint),
             Span::styled("j/k", key),
-            Span::styled(" tags   ", hint),
+            Span::styled(" tag   ", hint),
             Span::styled("c", key),
             Span::styled(" ID   ", hint),
             Span::styled("t", key),
@@ -1135,15 +1200,22 @@ fn row(label: &str, value: String, color: Color) -> Line<'static> {
     ])
 }
 
-fn tag_lines(tags: &str, width: usize) -> Vec<Line<'static>> {
+struct TagLayout {
+    lines: Vec<Line<'static>>,
+    /// Index of the first wrapped line occupied by each tag.
+    starts: Vec<usize>,
+}
+
+fn tag_layout(tags: &str, width: usize, selected: Option<usize>) -> TagLayout {
     let width = width.max(6);
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut line_len = 0usize;
 
-    for tag in tags.split_whitespace() {
+    for (index, tag) in tags.split_whitespace().enumerate() {
         let tlen = tag.chars().count();
-        let style = Style::default().fg(tag_color(tag));
+        let style = tag_style(tag, selected == Some(index));
 
         // Tags longer than the panel are hard-wrapped instead of truncated, so
         // every tag remains fully readable (the tag panel scrolls).
@@ -1152,6 +1224,7 @@ fn tag_lines(tags: &str, width: usize) -> Vec<Line<'static>> {
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 line_len = 0;
             }
+            starts.push(lines.len());
             let chars: Vec<char> = tag.chars().collect();
             for chunk in chars.chunks(width) {
                 lines.push(Line::from(Span::styled(
@@ -1166,6 +1239,7 @@ fn tag_lines(tags: &str, width: usize) -> Vec<Line<'static>> {
             lines.push(Line::from(std::mem::take(&mut spans)));
             line_len = 0;
         }
+        starts.push(lines.len());
         if !spans.is_empty() {
             spans.push(Span::raw(" "));
             line_len += 1;
@@ -1183,7 +1257,21 @@ fn tag_lines(tags: &str, width: usize) -> Vec<Line<'static>> {
             Style::default().fg(Color::DarkGray),
         )));
     }
-    lines
+    TagLayout { lines, starts }
+}
+
+#[cfg(test)]
+fn tag_lines(tags: &str, width: usize) -> Vec<Line<'static>> {
+    tag_layout(tags, width, None).lines
+}
+
+fn tag_style(tag: &str, selected: bool) -> Style {
+    let style = Style::default().fg(tag_color(tag));
+    if selected {
+        style.bg(SELECTED_TAG_BG).add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn tag_color(tag: &str) -> Color {
@@ -1985,6 +2073,7 @@ mod tests {
         let posts = [post];
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut tags = TagState::default();
         for (w, h) in [(80u16, 24u16), (120, 40), (50, 14), (200, 60), (20, 8)] {
             terminal.resize(Rect::new(0, 0, w, h)).unwrap();
             for phase in [
@@ -2000,7 +2089,7 @@ mod tests {
                         let reg = regions(f.area());
                         draw_header(f, &posts[0], 0, 1, reg.header);
                         let _ = draw_image_block(f, &posts[0], &phase, reg.image);
-                        let _ = draw_details_and_tags(f, &posts[0], reg.details, reg.tags, 3);
+                        draw_details_and_tags(f, &posts[0], reg.details, reg.tags, &mut tags);
                         draw_footer(f, &phase, "Ready", "", reg.status, reg.hints);
                     })
                     .unwrap();
@@ -2023,6 +2112,119 @@ mod tests {
             .join(" ");
         assert!(joined.contains(&long), "long tag was truncated: {joined}");
         assert!(joined.contains("suffix"));
+    }
+
+    #[test]
+    fn selected_tag_is_bold_and_highlighted() {
+        let layout = tag_layout("solo artist:alice blue", 80, Some(1));
+        let span = |needle: &str| {
+            layout
+                .lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .find(|span| span.content == needle)
+                .unwrap_or_else(|| panic!("missing span {needle:?}"))
+        };
+
+        let selected = span("artist:alice");
+        assert_eq!(selected.style.fg, Some(tag_color("artist:alice")));
+        assert_eq!(selected.style.bg, Some(SELECTED_TAG_BG));
+        assert!(selected.style.add_modifier.contains(Modifier::BOLD));
+
+        let other = span("solo");
+        assert_eq!(other.style.fg, Some(tag_color("solo")));
+        assert_eq!(other.style.bg, None);
+        assert!(!other.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn tag_layout_tracks_the_first_line_of_each_tag() {
+        let layout = tag_layout("aa bb cc dd", 5, None);
+        assert_eq!(layout.starts, vec![0, 0, 1, 1]);
+        let text = |layout: &TagLayout| {
+            layout
+                .lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text(&layout), vec!["aa bb", "cc dd"]);
+
+        // A wrapped tag starts on its first chunk line, and the following tag
+        // starts after every chunk rather than on the wrapped continuation.
+        let layout = tag_layout("aa superlongtag bb", 6, None);
+        assert_eq!(layout.starts, vec![0, 1, 3]);
+        assert_eq!(text(&layout), vec!["aa", "superl", "ongtag", "bb"]);
+    }
+
+    #[test]
+    fn tag_selection_keeps_the_cursor_in_view() {
+        let starts = vec![0, 2, 4, 6, 8, 10, 12];
+        let mut tags = TagState::default();
+
+        tags.update_layout(starts.clone(), 3, 12);
+        assert_eq!((tags.selected, tags.scroll), (0, 0));
+
+        tags.select_next(7, 4);
+        tags.update_layout(starts.clone(), 3, 12);
+        assert_eq!(tags.selected, 4);
+        assert_eq!(tags.scroll, 6);
+
+        tags.select_previous(7, 2);
+        tags.update_layout(starts.clone(), 3, 12);
+        assert_eq!(tags.selected, 2);
+        assert_eq!(tags.scroll, 4);
+
+        tags.select_last(7);
+        tags.update_layout(starts.clone(), 3, 12);
+        assert_eq!(tags.selected, 6);
+        assert_eq!(tags.scroll, 10);
+
+        tags.select_first();
+        tags.update_layout(starts, 3, 12);
+        assert_eq!(tags.selected, 0);
+        assert_eq!(tags.scroll, 0);
+    }
+
+    #[test]
+    fn drawing_follows_the_selected_tag() {
+        use ratatui::backend::TestBackend;
+
+        let post = Post {
+            tags: (0..60)
+                .map(|i| format!("tag_{i:02}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            ..Post::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut tags = TagState {
+            selected: 30,
+            ..TagState::default()
+        };
+
+        terminal
+            .draw(|f| {
+                let reg = regions(f.area());
+                draw_details_and_tags(f, &post, reg.details, reg.tags, &mut tags);
+            })
+            .unwrap();
+
+        assert_eq!(tags.selected, 30);
+        let start = tags.starts[tags.selected] as u16;
+        assert!(
+            start >= tags.scroll,
+            "selected tag scrolled above the panel"
+        );
+        assert!(
+            start < tags.scroll + tags.visible as u16,
+            "selected tag scrolled below the panel"
+        );
     }
 
     #[test]

@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-11-06
+
+Compare: [`v0.2.5...v0.2.6`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.5...v0.2.6)
+
+Adds a visible cursor to the viewer's tag panel.
+
+### Added
+
+- The TUI viewer highlights the selected tag in bold with a contrasting
+  background; `j`/`k`, `PageUp`/`PageDown`, `Home`/`End`, and the mouse wheel
+  move the selection and keep it scrolled into view.
+
+### Changed
+
+- The viewer footer describes `j`/`k` as tag selection instead of tag scrolling.
+
 ## [0.2.5] - 2026-11-05
 
 Compare: [`v0.2.4...v0.2.5`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.4...v0.2.5)
