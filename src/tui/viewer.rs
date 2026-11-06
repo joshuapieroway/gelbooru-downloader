@@ -278,6 +278,9 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                 let mut changed = false;
                 for outcome in reap_downloads(&mut active_downloads).await {
                     download_notice = quick_download_status(&outcome);
+                    // The queued/active message has served its purpose; the
+                    // finished notice now carries the result for this post.
+                    clear_download_status(&mut status, outcome.post_id);
                     changed = true;
                 }
                 let entries = queue.entries().await;
@@ -1467,6 +1470,16 @@ fn friendly_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// Remove a transient queue message once its download has finished, so the
+/// footer does not keep saying "Queued download..." next to the saved result.
+fn clear_download_status(status: &mut String, post_id: i64) {
+    let queued = format!("Queued download for post #{}...", post_id);
+    let active = format!("Post #{} is already downloading", post_id);
+    if status == &queued || status == &active {
+        status.clear();
+    }
+}
+
 fn quick_download_status(outcome: &DownloadOutcome) -> String {
     if let Some(err) = &outcome.error {
         if err.to_ascii_lowercase().contains("cancel") {
@@ -2157,6 +2170,26 @@ mod tests {
         let text = format_download_progress(&[&unknown_total]);
         assert_eq!(text, "#9: 2.0 KB");
         assert!(!text.contains("KBB"), "{text}");
+    }
+
+    #[test]
+    fn finishing_a_download_clears_its_stale_queue_message() {
+        let mut queued = "Queued download for post #7...".to_string();
+        clear_download_status(&mut queued, 7);
+        assert!(queued.is_empty(), "{queued:?}");
+
+        let mut active = "Post #7 is already downloading".to_string();
+        clear_download_status(&mut active, 7);
+        assert!(active.is_empty(), "{active:?}");
+
+        // A message for a different post (or an unrelated status) is kept.
+        let mut other = "Queued download for post #8...".to_string();
+        clear_download_status(&mut other, 7);
+        assert_eq!(other, "Queued download for post #8...");
+
+        let mut copied = "Copied 5 tags".to_string();
+        clear_download_status(&mut copied, 7);
+        assert_eq!(copied, "Copied 5 tags");
     }
 
     #[test]
