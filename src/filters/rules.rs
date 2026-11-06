@@ -102,59 +102,6 @@ impl FilterRules {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn post() -> Post {
-        let mut p = Post::default();
-        p.id = 10;
-        p.rating = "safe".to_string();
-        p.width = 1920;
-        p.height = 1080;
-        p.file_size = 1000;
-        p.score = 5;
-        p.file_url = "https://x/a.jpg".to_string();
-        p.tags = "landscape sky".to_string();
-        p
-    }
-    #[test]
-    fn rating_filter() {
-        let mut r = FilterRules::default();
-        r.ratings = vec!["safe".to_string()];
-        assert!(r.matches(&post()));
-        r.ratings = vec!["explicit".to_string()];
-        assert!(!r.matches(&post()));
-    }
-    #[test]
-    fn dimension_filter() {
-        let mut r = FilterRules::default();
-        r.min_width = Some(2000);
-        assert!(!r.matches(&post()));
-        r.min_width = Some(1000);
-        assert!(r.matches(&post()));
-    }
-    #[test]
-    fn exclude_tags() {
-        let mut r = FilterRules::default();
-        r.exclude_tags = vec!["sky".to_string()];
-        assert!(!r.matches(&post()));
-    }
-    #[test]
-    fn include_tags() {
-        let mut r = FilterRules::default();
-        r.include_tags = vec!["missing".to_string()];
-        assert!(!r.matches(&post()));
-    }
-    #[test]
-    fn ext_filter() {
-        let mut r = FilterRules::default();
-        r.extensions = vec!["png".to_string()];
-        assert!(!r.matches(&post()));
-        r.extensions = vec!["jpg".to_string()];
-        assert!(r.matches(&post()));
-    }
-}
-
 pub fn normalize_rating(r: &str) -> String {
     match r.trim().to_lowercase().as_str() {
         "safe" | "general" | "g" => "general".to_string(),
@@ -167,7 +114,79 @@ pub fn normalize_rating(r: &str) -> String {
 
 pub fn parse_ratings(s: &str) -> Vec<String> {
     s.split(',')
-        .map(|x| normalize_rating(x))
-        .filter(|x| !x.is_empty())
+        .map(normalize_rating)
+        .filter(|x| {
+            !x.is_empty() && !x.eq_ignore_ascii_case("all") && !x.eq_ignore_ascii_case("any")
+        })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn post() -> Post {
+        Post {
+            id: 10,
+            rating: "safe".to_string(),
+            width: 1920,
+            height: 1080,
+            file_size: 1000,
+            score: 5,
+            file_url: "https://x/a.jpg".to_string(),
+            tags: "landscape sky".to_string(),
+            ..Post::default()
+        }
+    }
+
+    #[test]
+    fn rating_filter() {
+        let mut r = FilterRules {
+            ratings: vec!["safe".to_string()],
+            ..FilterRules::default()
+        };
+        assert!(r.matches(&post()));
+        r.ratings = vec!["explicit".to_string()];
+        assert!(!r.matches(&post()));
+    }
+
+    #[test]
+    fn dimension_filter() {
+        let mut r = FilterRules {
+            min_width: Some(2000),
+            ..FilterRules::default()
+        };
+        assert!(!r.matches(&post()));
+        r.min_width = Some(1000);
+        assert!(r.matches(&post()));
+    }
+
+    #[test]
+    fn exclude_tags() {
+        let r = FilterRules {
+            exclude_tags: vec!["sky".to_string()],
+            ..FilterRules::default()
+        };
+        assert!(!r.matches(&post()));
+    }
+
+    #[test]
+    fn include_tags() {
+        let r = FilterRules {
+            include_tags: vec!["missing".to_string()],
+            ..FilterRules::default()
+        };
+        assert!(!r.matches(&post()));
+    }
+
+    #[test]
+    fn ext_filter() {
+        let mut r = FilterRules {
+            extensions: vec!["png".to_string()],
+            ..FilterRules::default()
+        };
+        assert!(!r.matches(&post()));
+        r.extensions = vec!["jpg".to_string()];
+        assert!(r.matches(&post()));
+    }
 }

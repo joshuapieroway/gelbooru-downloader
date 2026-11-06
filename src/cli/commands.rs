@@ -38,7 +38,7 @@ pub struct Cli {
     pub verbose: bool,
     #[arg(long, global = true)]
     pub json: bool,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Disable progress bars")]
     pub quiet: bool,
 
     #[command(subcommand)]
@@ -51,8 +51,9 @@ pub enum Commands {
         tags: String,
         #[arg(long)]
         rating: Option<String>,
-        #[arg(long, default_value_t = 100)]
-        limit: u32,
+        /// Maximum matching posts (defaults to `search.default_limit`).
+        #[arg(long)]
+        limit: Option<u32>,
         #[arg(long)]
         min_width: Option<u32>,
         #[arg(long)]
@@ -84,8 +85,9 @@ pub enum Commands {
         target: String,
         #[arg(long)]
         rating: Option<String>,
-        #[arg(long, default_value_t = 100)]
-        limit: u32,
+        /// Maximum matching posts (defaults to `search.default_limit`).
+        #[arg(long)]
+        limit: Option<u32>,
         #[arg(long)]
         output: Option<PathBuf>,
         #[arg(long)]
@@ -97,8 +99,9 @@ pub enum Commands {
     },
     Batch {
         file: String,
-        #[arg(long, default_value_t = 100)]
-        limit: u32,
+        /// Maximum matching posts per tag (defaults to `search.default_limit`).
+        #[arg(long)]
+        limit: Option<u32>,
         #[arg(long, default_value_t = 4)]
         jobs: usize,
     },
@@ -118,8 +121,9 @@ pub enum Commands {
     },
     Watch {
         tags: String,
-        #[arg(long, default_value_t = 300)]
-        interval: u64,
+        /// Poll interval in seconds (defaults to `watch.interval`).
+        #[arg(long)]
+        interval: Option<u64>,
     },
     Repl,
     Config {
@@ -181,16 +185,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             sort,
             order,
         } => {
-            let params = search::SearchParams {
-                tags: tags.clone(),
-                rating: rating.clone(),
-                limit,
-                page_size: cfg.search.page_size,
-                sort: sort.clone(),
-                order: order.clone(),
-            };
-            // rating default?
-            let posts = search::search_all(&client, &cfg, &params).await?;
             let mut rules = FilterRules::default();
             if let Some(r) = &rating {
                 rules.ratings = crate::filters::rules::parse_ratings(r);
@@ -204,7 +198,16 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             rules.min_score = min_score;
             rules.max_score = max_score;
             rules.extensions = ext;
-            let posts = rules.filter_posts(posts);
+            let params = search::SearchParams {
+                tags: tags.clone(),
+                rating: rating.clone(),
+                limit: limit.unwrap_or(cfg.search.default_limit),
+                page_size: cfg.search.page_size,
+                sort: sort.clone(),
+                order: order.clone(),
+                filters: rules,
+            };
+            let posts = search::search_all(&client, &cfg, &params).await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&posts)?);
             } else {
@@ -220,7 +223,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                         p.file_url
                     );
                 }
-                println!("Total: {}", posts.len());
+                if !cli.quiet {
+                    println!("Total: {}", posts.len());
+                }
             }
         }
         Commands::Inspect { id } => {
@@ -254,65 +259,106 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             // determine if target is id
             if let Ok(id) = target.parse::<i64>() {
                 let post = client.get_post(id).await?;
-                let pb = download_bytes_bar(post.file_size.max(0) as u64, 1);
-                engine.progress_bar = Some(pb.clone());
-                let o = engine.download_post(post, out_dir).await;
-                pb.finish_and_clear();
-                println!("{:?}", o);
-            } else {
-                let params = search::SearchParams {
-                    tags: target.clone(),
-                    rating: rating.clone(),
-                    limit,
-                    page_size: cfg.search.page_size,
-                    sort: sort.clone(),
-                    order: order.clone(),
+                let pb = if cli.quiet {
+                    None
+                } else {
+                    Some(download_bytes_bar(post.file_size.max(0) as u64, 1))
                 };
-                let posts = search::search_all(&client, &cfg, &params).await?;
+                engine.progress_bar = pb.clone();
+                let outcome = engine.download_post(post, out_dir).await;
+                if let Some(pb) = &pb {
+                    pb.finish_and_clear();
+                }
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&outcome)?);
+                } else {
+                    println!("{}", outcome.summary());
+                    if let Some(err) = &outcome.error {
+                        eprintln!("error: {err}");
+                    }
+                }
+            } else {
                 let mut rules = FilterRules::default();
                 if let Some(r) = &rating {
                     rules.ratings = crate::filters::rules::parse_ratings(r);
                 }
-                let posts = rules.filter_posts(posts);
+                let params = search::SearchParams {
+                    tags: target.clone(),
+                    rating: rating.clone(),
+                    limit: limit.unwrap_or(cfg.search.default_limit),
+                    page_size: cfg.search.page_size,
+                    sort: sort.clone(),
+                    order: order.clone(),
+                    filters: rules,
+                };
+                let posts = search::search_all(&client, &cfg, &params).await?;
                 let total_bytes: u64 = posts
                     .iter()
                     .filter(|p| p.file_size > 0)
                     .map(|p| p.file_size as u64)
                     .sum();
-                let pb = if total_bytes > 0 {
-                    download_bytes_bar(total_bytes, posts.len())
+                let pb = if cli.quiet || posts.is_empty() {
+                    None
+                } else if total_bytes > 0 {
+                    Some(download_bytes_bar(total_bytes, posts.len()))
                 } else {
-                    download_count_bar(posts.len())
+                    Some(download_count_bar(posts.len()))
                 };
-                let outcomes = engine.download_many(posts, out_dir, Some(pb)).await;
-                let ok = outcomes
-                    .iter()
-                    .filter(|o| o.error.is_none() && !o.skipped)
-                    .count();
-                let skip = outcomes.iter().filter(|o| o.skipped).count();
-                let fail = outcomes.iter().filter(|o| o.error.is_some()).count();
-                println!("completed={} skipped={} failed={}", ok, skip, fail);
-                for o in outcomes {
-                    if let Some(e) = o.error {
-                        eprintln!("{}: {}", o.post_id, e);
+                let outcomes = engine.download_many(posts, out_dir, pb).await;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&outcomes)?);
+                } else {
+                    let ok = outcomes
+                        .iter()
+                        .filter(|o| o.error.is_none() && !o.skipped)
+                        .count();
+                    let skip = outcomes.iter().filter(|o| o.skipped).count();
+                    let fail = outcomes.iter().filter(|o| o.error.is_some()).count();
+                    println!("completed={} skipped={} failed={}", ok, skip, fail);
+                    for o in outcomes {
+                        if let Some(e) = o.error {
+                            eprintln!("{}: {}", o.post_id, e);
+                        }
                     }
                 }
             }
         }
         Commands::Batch { file, limit, jobs } => {
             let engine = DownloadEngine::new(cfg.clone(), db.clone());
-            let done = batch::run_batch(
+            let report = batch::run_batch(
                 &file,
                 &client,
                 &cfg,
                 &engine,
-                FilterRules::default(),
-                limit,
-                Some(cfg.download_dir()),
-                jobs,
+                batch::BatchOptions {
+                    filters: FilterRules::default(),
+                    limit_per_tag: limit.unwrap_or(cfg.search.default_limit),
+                    output_dir: Some(cfg.download_dir()),
+                    concurrent_jobs: jobs,
+                },
             )
             .await?;
-            println!("Processed {} tag groups", done.len());
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "Processed {} tag groups: completed={} skipped={} failed={}",
+                    report.tags.len(),
+                    report.completed(),
+                    report.skipped(),
+                    report.failed()
+                );
+                for (tag, error) in &report.errors {
+                    if tag.is_empty() {
+                        eprintln!("batch error: {error}");
+                    } else {
+                        eprintln!("{}: search failed: {}", tag, error);
+                    }
+                }
+            }
+            if !report.errors.is_empty() {
+                anyhow::bail!("{} tag groups failed", report.errors.len());
+            }
         }
         Commands::History {
             search,
@@ -325,13 +371,25 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                     db.clear().await?;
                     println!("History cleared.");
                 } else if let Some(path) = export {
-                    let recs = db.list(100000, None).await?;
-                    let mut wtr = csv_writer(&path)?;
+                    let recs = db.list(100000, search).await?;
+                    let mut wtr = std::io::BufWriter::new(csv_writer(&path)?);
+                    writeln!(
+                        wtr,
+                        "post_id,url,local_path,file_size,file_hash,downloaded_at,tags,rating,status"
+                    )?;
                     for r in recs {
                         writeln!(
                             wtr,
-                            "{},{},{},{},{}",
-                            r.post_id, r.url, r.local_path, r.file_size, r.file_hash
+                            "{},{},{},{},{},{},{},{},{}",
+                            r.post_id,
+                            csv_escape(&r.url),
+                            csv_escape(&r.local_path),
+                            r.file_size,
+                            csv_escape(&r.file_hash),
+                            csv_escape(&r.downloaded_at),
+                            csv_escape(&r.tags),
+                            csv_escape(&r.rating),
+                            csv_escape(&r.status)
                         )?;
                     }
                     println!("Exported to {}", path.display());
@@ -357,15 +415,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             match cmd {
                 PresetCmd::Create { name } => {
                     // interactive minimal: create empty preset with name and tags prompt
-                    use std::io::{self, Write};
+                    use std::io::{self, BufRead};
                     print!("Tags: ");
-                    io::stdout().flush().unwrap();
+                    io::stdout().flush()?;
                     let mut tags = String::new();
-                    io::stdin().read_line(&mut tags).unwrap();
+                    io::stdin().lock().read_line(&mut tags)?;
                     let preset = Preset {
                         name: name.clone(),
                         tags: tags.trim().to_string(),
-                        limit: 100,
+                        limit: cfg.search.default_limit,
                         ..Default::default()
                     };
                     pm.create(preset).await?;
@@ -384,6 +442,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 PresetCmd::Run { name } => {
                     if let Some(preset) = pm.get(&name).await? {
                         let engine = DownloadEngine::new(cfg.clone(), Some(db.clone()));
+                        let filters = preset.to_filter_rules();
                         let params = search::SearchParams {
                             tags: preset.tags.clone(),
                             rating: preset.rating.clone(),
@@ -391,22 +450,42 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                             page_size: cfg.search.page_size,
                             sort: None,
                             order: None,
+                            filters,
                         };
                         let posts = search::search_all(&client, &cfg, &params).await?;
-                        let posts = preset.to_filter_rules().filter_posts(posts);
                         let out_dir = preset.output_dir.as_ref().map(|d| paths::expand_tilde(d));
                         let total_bytes: u64 = posts
                             .iter()
                             .filter(|p| p.file_size > 0)
                             .map(|p| p.file_size as u64)
                             .sum();
-                        let pb = if total_bytes > 0 {
-                            download_bytes_bar(total_bytes, posts.len())
+                        let pb = if cli.quiet || posts.is_empty() {
+                            None
+                        } else if total_bytes > 0 {
+                            Some(download_bytes_bar(total_bytes, posts.len()))
                         } else {
-                            download_count_bar(posts.len())
+                            Some(download_count_bar(posts.len()))
                         };
-                        let outcomes = engine.download_many(posts, out_dir, Some(pb)).await;
-                        println!("Run '{}': {} downloads", name, outcomes.len());
+                        let outcomes = engine.download_many(posts, out_dir, pb).await;
+                        if cli.json {
+                            println!("{}", serde_json::to_string_pretty(&outcomes)?);
+                        } else {
+                            let ok = outcomes
+                                .iter()
+                                .filter(|o| o.error.is_none() && !o.skipped)
+                                .count();
+                            let skip = outcomes.iter().filter(|o| o.skipped).count();
+                            let fail = outcomes.iter().filter(|o| o.error.is_some()).count();
+                            println!(
+                                "Run '{}': completed={} skipped={} failed={}",
+                                name, ok, skip, fail
+                            );
+                            for o in outcomes {
+                                if let Some(e) = o.error {
+                                    eprintln!("{}: {}", o.post_id, e);
+                                }
+                            }
+                        }
                     } else {
                         println!("Preset not found.");
                     }
@@ -418,6 +497,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 .clone()
                 .unwrap_or_else(|| Arc::new(HistoryDb::open_in_memory().unwrap()));
             let engine = DownloadEngine::new(cfg.clone(), Some(db.clone()));
+            let interval = interval.unwrap_or(cfg.watch.interval).max(1);
             let watcher = Watcher {
                 tags: tags.clone(),
                 interval,
@@ -474,6 +554,15 @@ fn csv_writer(path: &PathBuf) -> anyhow::Result<std::fs::File> {
     Ok(std::fs::File::create(path)?)
 }
 
+/// Quote a CSV field when it contains a comma, quote, or line break.
+fn csv_escape(field: &str) -> String {
+    if field.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
 /// Spinner frames, ending in a check mark for the finished state.
 const SPINNER_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✔"];
 
@@ -519,5 +608,13 @@ mod tests {
             ProgressStyle::with_template(template)
                 .unwrap_or_else(|e| panic!("invalid template {template:?}: {e}"));
         }
+    }
+
+    #[test]
+    fn csv_fields_are_escaped() {
+        assert_eq!(csv_escape("plain"), "plain");
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_escape("line\nbreak"), "\"line\nbreak\"");
     }
 }

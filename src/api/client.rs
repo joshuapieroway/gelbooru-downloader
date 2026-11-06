@@ -17,7 +17,7 @@ impl GelbooruClient {
         let http = Client::builder()
             .timeout(Duration::from_secs(config.api.timeout))
             .pool_max_idle_per_host(16)
-            .user_agent("gelbooru-downloader/0.1")
+            .user_agent(concat!("gelbooru-downloader/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| AppError::Http(e.to_string()))?;
         Ok(Self {
@@ -39,7 +39,7 @@ impl GelbooruClient {
         let http = Client::builder()
             .timeout(Duration::from_secs(timeout))
             .pool_max_idle_per_host(16)
-            .user_agent("gelbooru-downloader/0.1")
+            .user_agent(concat!("gelbooru-downloader/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| AppError::Http(e.to_string()))?;
         Ok(Self {
@@ -67,11 +67,8 @@ impl GelbooruClient {
             .await
             .map_err(|e| AppError::Http(e.to_string()))?;
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-            AppError::Api(format!(
-                "json parse: {} body={}",
-                e,
-                &text[..text.len().min(200)]
-            ))
+            let snippet: String = text.chars().take(200).collect();
+            AppError::Api(format!("json parse: {} body={}", e, snippet))
         })?;
         let posts = crate::api::models::parse_posts(&v);
         posts
@@ -90,6 +87,9 @@ impl GelbooruClient {
     ) -> Result<(Vec<crate::api::models::Post>, i64)> {
         let url = format!("{}/index.php", self.base_url);
         let pid = page.saturating_sub(1);
+        // Gelbooru caps responses at 100 posts regardless of the requested
+        // limit. Clamping here keeps paging offsets correct for every caller.
+        let limit = limit.clamp(1, crate::api::search::MAX_PAGE_SIZE);
         let limit_s = limit.to_string();
         let pid_s = pid.to_string();
         let mut params: Vec<(&str, String)> = vec![

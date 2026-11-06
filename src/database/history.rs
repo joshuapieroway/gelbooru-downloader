@@ -32,35 +32,27 @@ impl HistoryDb {
         }
         let conn = Connection::open(path).map_err(AppError::from)?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
-        // Migrate legacy schema (post_id primary key, path/timestamp/sha256 columns) to new schema.
-        let has_id: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name='id'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false);
-        let table_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='downloads'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false);
-        if table_exists && !has_id {
-            conn.execute("ALTER TABLE downloads RENAME TO downloads_legacy", [])
+        // Migrate legacy schema (post_id primary key, path/timestamp/sha256
+        // columns) to the current schema. The rename and copy live in one
+        // transaction so a crash cannot strand data in `downloads_legacy`.
+        let downloads_exists = table_exists(&conn, "downloads")?;
+        let has_id = downloads_exists && has_column(&conn, "downloads", "id")?;
+        if downloads_exists && !has_id {
+            let tx = conn.unchecked_transaction().map_err(AppError::from)?;
+            tx.execute("ALTER TABLE downloads RENAME TO downloads_legacy", [])
                 .map_err(AppError::from)?;
-        }
-        conn.execute_batch(SCHEMA).map_err(AppError::from)?;
-        if table_exists && !has_id {
-            conn.execute(
-                "INSERT OR IGNORE INTO downloads (post_id,url,local_path,file_size,file_hash,downloaded_at,tags,rating,status)
-                 SELECT post_id, url, COALESCE(path,''), file_size, COALESCE(sha256,''), timestamp, tags, '', status FROM downloads_legacy",
-                []).map_err(AppError::from)?;
-            conn.execute("DROP TABLE downloads_legacy", [])
-                .map_err(AppError::from)?;
+            tx.execute_batch(SCHEMA).map_err(AppError::from)?;
+            migrate_legacy(&tx)?;
+            tx.commit().map_err(AppError::from)?;
+        } else {
+            conn.execute_batch(SCHEMA).map_err(AppError::from)?;
+            // Recover from an older build that created the new table but
+            // failed before copying and dropping the legacy table.
+            if table_exists(&conn, "downloads_legacy")? {
+                let tx = conn.unchecked_transaction().map_err(AppError::from)?;
+                migrate_legacy(&tx)?;
+                tx.commit().map_err(AppError::from)?;
+            }
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -124,6 +116,30 @@ impl HistoryDb {
                 )
                 .map_err(AppError::from)?;
             Ok(count > 0)
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+
+    /// Path of one completed download with this hash, if any. Used to skip a
+    /// duplicate only when the existing copy is still on disk.
+    pub async fn hash_path(&self, hash: &str) -> Result<Option<String>> {
+        let conn = self.conn.clone();
+        let hash = hash.to_string();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            let res = c.query_row(
+                "SELECT local_path FROM downloads
+                 WHERE file_hash=?1 AND file_hash<>'' AND status='completed'
+                 ORDER BY downloaded_at DESC LIMIT 1",
+                params![hash],
+                |r| r.get(0),
+            );
+            match res {
+                Ok(path) => Ok(Some(path)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(AppError::from(e)),
+            }
         })
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
@@ -303,6 +319,61 @@ impl HistoryDb {
     }
 }
 
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .map_err(AppError::from)?;
+    Ok(count > 0)
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({})", table))
+        .map_err(AppError::from)?;
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(AppError::from)?;
+    for name in names {
+        if name.map_err(AppError::from)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn migrate_legacy(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let path = if has_column(tx, "downloads_legacy", "path")? {
+        "COALESCE(path,'')"
+    } else {
+        "''"
+    };
+    let sha = if has_column(tx, "downloads_legacy", "sha256")? {
+        "COALESCE(sha256,'')"
+    } else {
+        "''"
+    };
+    let when = if has_column(tx, "downloads_legacy", "timestamp")? {
+        "COALESCE(timestamp, datetime('now'))"
+    } else {
+        "datetime('now')"
+    };
+    tx.execute(
+        &format!(
+            "INSERT OR IGNORE INTO downloads (post_id,url,local_path,file_size,file_hash,downloaded_at,tags,rating,status)
+             SELECT post_id, url, {path}, file_size, {sha}, {when}, tags, '', status FROM downloads_legacy"
+        ),
+        [],
+    )
+    .map_err(AppError::from)?;
+    tx.execute("DROP TABLE downloads_legacy", [])
+        .map_err(AppError::from)?;
+    Ok(())
+}
+
 // helper for now timestamp
 pub fn now() -> String {
     Utc::now().to_rfc3339()
@@ -333,6 +404,120 @@ mod tests {
         let recs = db.list(10, None).await.unwrap();
         assert_eq!(recs.len(), 1);
     }
+    fn record(post_id: i64, hash: &str, path: &str, at: &str) -> DownloadRecord {
+        DownloadRecord {
+            id: None,
+            post_id,
+            url: "http://x".into(),
+            local_path: path.into(),
+            file_size: 10,
+            file_hash: hash.into(),
+            downloaded_at: at.into(),
+            tags: "t".into(),
+            rating: "safe".into(),
+            status: "completed".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn hash_path_finds_the_newest_copy() {
+        let db = HistoryDb::open_in_memory().unwrap();
+        db.insert(record(1, "same", "/tmp/old.png", "2020-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        db.insert(record(2, "same", "/tmp/new.png", "2024-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.hash_path("same").await.unwrap().as_deref(),
+            Some("/tmp/new.png")
+        );
+        assert_eq!(db.hash_path("missing").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn migrates_a_legacy_downloads_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE downloads (
+                     post_id INTEGER PRIMARY KEY,
+                     url TEXT NOT NULL,
+                     path TEXT,
+                     file_size INTEGER NOT NULL DEFAULT 0,
+                     sha256 TEXT,
+                     timestamp TEXT,
+                     tags TEXT,
+                     status TEXT NOT NULL DEFAULT 'completed'
+                 );
+                 INSERT INTO downloads VALUES
+                     (9, 'http://x/9', '/tmp/9.png', 12, 'abc', '2020-02-02T00:00:00Z', 'tag', 'completed');",
+            )
+            .unwrap();
+        }
+
+        let db = HistoryDb::open(&path).unwrap();
+        let recs = db.list(10, None).await.unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].post_id, 9);
+        assert_eq!(recs[0].local_path, "/tmp/9.png");
+        assert_eq!(recs[0].file_hash, "abc");
+        assert_eq!(recs[0].downloaded_at, "2020-02-02T00:00:00Z");
+        drop(db);
+
+        // Reopening must not repeat or lose the migration.
+        let db = HistoryDb::open(&path).unwrap();
+        assert_eq!(db.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovers_a_stranded_legacy_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO downloads (post_id,url,local_path,downloaded_at)
+                 VALUES (1,'http://x/1','/tmp/1.png','2023-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "CREATE TABLE downloads_legacy (
+                     post_id INTEGER PRIMARY KEY,
+                     url TEXT NOT NULL,
+                     path TEXT,
+                     file_size INTEGER NOT NULL DEFAULT 0,
+                     sha256 TEXT,
+                     timestamp TEXT,
+                     tags TEXT,
+                     status TEXT NOT NULL DEFAULT 'completed'
+                 );
+                 INSERT INTO downloads_legacy VALUES
+                     (2, 'http://x/2', '/tmp/2.png', 4, 'def', '2021-01-01T00:00:00Z', 'tag', 'completed');",
+            )
+            .unwrap();
+        }
+
+        let db = HistoryDb::open(&path).unwrap();
+        assert_eq!(db.count().await.unwrap(), 2);
+        let legacy_exists: bool = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='downloads_legacy'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap();
+        assert!(!legacy_exists);
+    }
+
     #[tokio::test]
     async fn watch_state() {
         let db = HistoryDb::open_in_memory().unwrap();

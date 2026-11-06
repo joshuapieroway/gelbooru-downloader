@@ -29,10 +29,12 @@ async fn downloads_file_atomically() {
     cfg.downloads.directory = dir.path().to_string_lossy().to_string();
     let db = Arc::new(HistoryDb::open_in_memory().unwrap());
     let engine = DownloadEngine::new(cfg, Some(db.clone()));
-    let mut post = Post::default();
-    post.id = 7;
-    post.file_url = format!("{}/img.png", server.uri());
-    post.md5 = "abc".to_string();
+    let post = Post {
+        id: 7,
+        file_url: format!("{}/img.png", server.uri()),
+        md5: "abc".to_string(),
+        ..Post::default()
+    };
     let out = engine.download_post(post, None).await;
     assert!(out.error.is_none(), "{:?}", out.error);
     assert!(out.path.exists());
@@ -61,12 +63,13 @@ async fn progress_bar_tracks_downloaded_bytes() {
 
     let mut posts = Vec::new();
     for i in 0..2 {
-        let mut post = Post::default();
-        post.id = 100 + i;
-        post.md5 = format!("hash{i}");
-        post.file_url = format!("{}/img{i}.png", server.uri());
-        post.file_size = bytes.len() as i64;
-        posts.push(post);
+        posts.push(Post {
+            id: 100 + i,
+            md5: format!("hash{i}"),
+            file_url: format!("{}/img{i}.png", server.uri()),
+            file_size: bytes.len() as i64,
+            ..Post::default()
+        });
     }
 
     // A hidden bar still keeps length/position state, so we can assert on it
@@ -80,6 +83,87 @@ async fn progress_bar_tracks_downloaded_bytes() {
     // `finish` pins the position to the full length.
     assert_eq!(pb.position(), bytes.len() as u64 * 2);
     assert_eq!(pb.message(), "2/2 files");
+}
+
+#[tokio::test]
+async fn download_many_deduplicates_repeated_posts() {
+    let server = MockServer::start().await;
+    let bytes = png_bytes();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+        .mount(&server)
+        .await;
+    let mut cfg = Config::default();
+    cfg.api.base_url = server.uri();
+    cfg.downloads.validate_files = false;
+    cfg.downloads.resume = false;
+    let dir = tempdir().unwrap();
+    cfg.downloads.directory = dir.path().to_string_lossy().to_string();
+    let db = Arc::new(HistoryDb::open_in_memory().unwrap());
+    let engine = DownloadEngine::new(cfg, Some(db));
+
+    let post = Post {
+        id: 11,
+        md5: "abc".to_string(),
+        file_url: format!("{}/img.png", server.uri()),
+        ..Post::default()
+    };
+
+    let out = engine
+        .download_many(vec![post.clone(), post], None, None)
+        .await;
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0].error.is_none(), "{out:?}");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "duplicate post should only be fetched once"
+    );
+}
+
+#[tokio::test]
+async fn hash_duplicate_keeps_the_new_file_when_the_old_copy_is_gone() {
+    let server = MockServer::start().await;
+    let bytes = png_bytes();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+        .mount(&server)
+        .await;
+    let mut cfg = Config::default();
+    cfg.api.base_url = server.uri();
+    cfg.downloads.validate_files = false;
+    cfg.downloads.resume = false;
+    let dir = tempdir().unwrap();
+    cfg.downloads.directory = dir.path().to_string_lossy().to_string();
+    let db = Arc::new(HistoryDb::open_in_memory().unwrap());
+
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    db.insert(gelbooru_downloader::database::history::DownloadRecord {
+        id: None,
+        post_id: 1,
+        url: "old".into(),
+        local_path: dir.path().join("missing.png").to_string_lossy().to_string(),
+        file_size: bytes.len() as i64,
+        file_hash: hash,
+        downloaded_at: gelbooru_downloader::database::history::now(),
+        tags: String::new(),
+        rating: String::new(),
+        status: "completed".into(),
+    })
+    .await
+    .unwrap();
+
+    let engine = DownloadEngine::new(cfg, Some(db));
+    let post = Post {
+        id: 2,
+        md5: "abc".to_string(),
+        file_url: format!("{}/img.png", server.uri()),
+        ..Post::default()
+    };
+    let out = engine.download_post(post, None).await;
+    assert!(out.error.is_none(), "{out:?}");
+    assert!(!out.skipped, "missing copy must not count as a duplicate");
+    assert!(out.path.exists(), "the newly downloaded file was deleted");
 }
 
 #[tokio::test]
@@ -114,10 +198,12 @@ async fn duplicate_post_skipped() {
     // create the expected on-disk file so the duplicate is skipped
     let expected = dir.path().join("9_file.png");
     std::fs::write(&expected, b"x").unwrap();
-    let mut post = Post::default();
-    post.id = 9;
-    post.md5 = "".to_string();
-    post.file_url = format!("{}/img.png", server.uri());
+    let post = Post {
+        id: 9,
+        md5: "".to_string(),
+        file_url: format!("{}/img.png", server.uri()),
+        ..Post::default()
+    };
     let out = engine.download_post(post, None).await;
     assert!(out.skipped);
 }

@@ -65,6 +65,18 @@ enum Phase {
     Unsupported(String),
 }
 
+/// Everything the viewer needs from the search tab.
+pub struct ViewerRequest {
+    pub posts: Vec<Post>,
+    pub start: usize,
+    pub db: Option<Arc<HistoryDb>>,
+    pub client: Option<GelbooruClient>,
+    pub query: String,
+    pub per_page: usize,
+    pub page: usize,
+    pub total: i64,
+}
+
 /// Show the viewer starting at `start` in `posts`.
 ///
 /// The caller keeps its own search state untouched; this function only draws on
@@ -72,24 +84,23 @@ enum Phase {
 /// allows navigation past the bounds of `posts` to fetch adjacent pages from the
 /// API, enabling indefinite browsing through the search results.
 /// Pressing `d` queues downloads that show progress in the status area.
-pub async fn show(
-    terminal: &mut TuiTerminal,
-    posts: &[Post],
-    start: usize,
-    cfg: &Config,
-    db: Option<Arc<HistoryDb>>,
-    client: Option<GelbooruClient>,
-    query: String,
-    search_per_page: usize,
-    search_page: usize,
-    search_total: i64,
-) {
+pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerRequest) {
+    let ViewerRequest {
+        posts,
+        start,
+        db,
+        client,
+        query,
+        per_page: search_per_page,
+        page: search_page,
+        total: search_total,
+    } = request;
     if posts.is_empty() {
         return;
     }
 
     let mut index = start.min(posts.len() - 1);
-    let mut all_posts: Vec<Post> = posts.to_vec();
+    let mut all_posts: Vec<Post> = posts;
     // The caller hands us exactly one page of results (the one the search tab
     // is showing), so the loaded range starts out as a single page.  Pressing
     // left/right past the ends fetches adjacent pages, in either direction.
@@ -110,6 +121,9 @@ pub async fn show(
 
     // Refreshed while the viewer is idle so multiple downloads stay visible.
     let mut downloads_summary: String;
+    // Result of the most recently finished quick download, shown next to the
+    // live queue so a brief "Saved ..." message is not lost.
+    let mut download_notice = String::new();
 
     // Previews for the neighbouring posts are fetched in the background so
     // stepping through the gallery rarely has to wait on the network.
@@ -126,14 +140,18 @@ pub async fn show(
         let mut status = String::new();
         let mut preview: Option<PathBuf> = None;
 
-        // Check for completed downloads - just clean up finished handles
-        // The queue is updated directly by the DownloadEngine
-        active_downloads.retain(|h| !h.is_finished());
+        // Collect finished quick downloads. The queue itself is updated by the
+        // engine; the handles only provide the final outcome for the status
+        // line (saved path, duplicate, or error).
+        for outcome in reap_downloads(&mut active_downloads).await {
+            download_notice = quick_download_status(&outcome);
+        }
 
         // Get current download queue entries for display. The footer refreshes
         // this while the viewer is idle, so several downloads stay visible.
         let queue_entries = queue.entries().await;
-        downloads_summary = format_download_progress(&active_download_entries(&queue_entries));
+        downloads_summary =
+            combine_download_status(&download_notice, &visible_download_entries(&queue_entries));
 
         let kind = media_kind(post);
         let cached_path = preview_path(post);
@@ -257,22 +275,28 @@ pub async fn show(
             let Some(ev) = ev else {
                 // Refresh download progress while the viewer is idle so
                 // several active downloads remain visible.
-                active_downloads.retain(|h| !h.is_finished());
-                if !downloads_summary.is_empty() {
-                    let entries = queue.entries().await;
-                    let summary = format_download_progress(&active_download_entries(&entries));
-                    if summary != downloads_summary {
-                        downloads_summary = summary;
-                        let _ = draw(
-                            terminal,
-                            &all_posts,
-                            index,
-                            &phase,
-                            tags_scroll,
-                            &status,
-                            &downloads_summary,
-                        );
-                    }
+                let mut changed = false;
+                for outcome in reap_downloads(&mut active_downloads).await {
+                    download_notice = quick_download_status(&outcome);
+                    changed = true;
+                }
+                let entries = queue.entries().await;
+                let summary =
+                    combine_download_status(&download_notice, &visible_download_entries(&entries));
+                if summary != downloads_summary {
+                    downloads_summary = summary;
+                    changed = true;
+                }
+                if changed {
+                    let _ = draw(
+                        terminal,
+                        &all_posts,
+                        index,
+                        &phase,
+                        tags_scroll,
+                        &status,
+                        &downloads_summary,
+                    );
                 }
                 continue;
             };
@@ -581,8 +605,10 @@ pub async fn show(
                                 // limit across every queued post.
                                 queue.add_queued(post.id).await;
                                 let entries = queue.entries().await;
-                                downloads_summary =
-                                    format_download_progress(&active_download_entries(&entries));
+                                downloads_summary = combine_download_status(
+                                    &download_notice,
+                                    &visible_download_entries(&entries),
+                                );
 
                                 status = format!("Queued download for post #{}...", post.id);
 
@@ -1441,7 +1467,6 @@ fn friendly_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-#[allow(dead_code)]
 fn quick_download_status(outcome: &DownloadOutcome) -> String {
     if let Some(err) = &outcome.error {
         if err.to_ascii_lowercase().contains("cancel") {
@@ -1555,12 +1580,9 @@ async fn fetch_preview_to(post: &Post, target: &Path) -> Result<(PathBuf, bool),
 
     // Determine which URL to use - prefer sample for large images to load faster
     // Gelbooru provides: file_url (full), sample_url (~1000px), preview_url (thumbnail)
-    let file_url = if should_use_sample(post) {
-        if !post.sample_url.trim().is_empty() {
-            post.sample_url.clone()
-        } else {
-            post.file_url.clone()
-        }
+    let used_sample = should_use_sample(post) && !post.sample_url.trim().is_empty();
+    let file_url = if used_sample {
+        post.sample_url.clone()
     } else {
         post.file_url.clone()
     };
@@ -1637,7 +1659,7 @@ async fn fetch_preview_to(post: &Post, target: &Path) -> Result<(PathBuf, bool),
                 let _ = std::fs::remove_file(&tmp);
                 format!("Could not save preview: {e}")
             })?;
-            Ok((target.to_path_buf(), true)) // second value indicates this is a cached sample
+            Ok((target.to_path_buf(), used_sample))
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -1772,8 +1794,10 @@ fn open_post(post: &Post) -> Result<(), String> {
         .map_err(|e| format!("Could not open browser: {e}"))
 }
 
-/// Entries that are still queued or actively downloading.
-fn active_download_entries(entries: &[DownloadEntry]) -> Vec<&DownloadEntry> {
+/// Entries worth showing in the footer: queued and actively downloading ones.
+/// Finished results are shown separately via `combine_download_status`, so a
+/// long queue still lists the jobs that are still moving.
+fn visible_download_entries(entries: &[DownloadEntry]) -> Vec<&DownloadEntry> {
     entries
         .iter()
         .filter(|e| {
@@ -1783,6 +1807,35 @@ fn active_download_entries(entries: &[DownloadEntry]) -> Vec<&DownloadEntry> {
             )
         })
         .collect()
+}
+
+/// Reap finished download tasks without blocking on the ones still running.
+async fn reap_downloads(
+    handles: &mut Vec<tokio::task::JoinHandle<DownloadOutcome>>,
+) -> Vec<DownloadOutcome> {
+    let mut finished = Vec::new();
+    let mut pending = Vec::new();
+    for handle in handles.drain(..) {
+        if handle.is_finished() {
+            match handle.await {
+                Ok(outcome) => finished.push(outcome),
+                Err(e) => tracing::warn!("download task failed: {e}"),
+            }
+        } else {
+            pending.push(handle);
+        }
+    }
+    *handles = pending;
+    finished
+}
+
+fn combine_download_status(notice: &str, entries: &[&DownloadEntry]) -> String {
+    let progress = format_download_progress(entries);
+    match (notice.is_empty(), progress.is_empty()) {
+        (true, _) => progress,
+        (false, true) => notice.to_string(),
+        (false, false) => format!("{notice}  ·  {progress}"),
+    }
 }
 
 /// Format download progress for display in the status bar.
@@ -1801,7 +1854,7 @@ fn format_download_progress(entries: &[&DownloadEntry]) -> String {
                         human_bytes(e.total)
                     )
                 } else {
-                    format!("{}B", human_bytes(e.bytes))
+                    human_bytes(e.bytes)
                 }
             }
             DownloadStatus::Completed => "done".to_string(),
@@ -1843,9 +1896,10 @@ mod tests {
     use super::*;
 
     fn post(url: &str) -> Post {
-        let mut p = Post::default();
-        p.file_url = url.to_string();
-        p
+        Post {
+            file_url: url.to_string(),
+            ..Post::default()
+        }
     }
 
     #[test]
@@ -1900,20 +1954,22 @@ mod tests {
     fn viewer_layout_renders_at_many_sizes() {
         use ratatui::backend::TestBackend;
 
-        let mut post = Post::default();
-        post.id = 123456;
-        post.rating = "explicit".into();
-        post.width = 1920;
-        post.height = 1080;
-        post.score = 42;
-        post.source = "https://example.com/a/very/long/source/url/that/needs/wrapping".into();
-        post.tags = (0..80)
-            .map(|i| format!("artist:artist_{i}_with_a_long_name"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        post.file_url = "https://img4.gelbooru.com/images/ab/cd/123.jpg".into();
-        post.file_size = 2_500_000;
-        let posts = vec![post];
+        let post = Post {
+            id: 123456,
+            rating: "explicit".into(),
+            width: 1920,
+            height: 1080,
+            score: 42,
+            source: "https://example.com/a/very/long/source/url/that/needs/wrapping".into(),
+            tags: (0..80)
+                .map(|i| format!("artist:artist_{i}_with_a_long_name"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            file_url: "https://img4.gelbooru.com/images/ab/cd/123.jpg".into(),
+            file_size: 2_500_000,
+            ..Post::default()
+        };
+        let posts = [post];
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         for (w, h) in [(80u16, 24u16), (120, 40), (50, 14), (200, 60), (20, 8)] {
@@ -2030,9 +2086,11 @@ mod tests {
 
     #[tokio::test]
     async fn load_preview_reuses_a_finished_prefetch() {
-        let mut post = Post::default();
-        post.id = 7;
-        post.file_url = "https://example.invalid/image.jpg".into();
+        let post = Post {
+            id: 7,
+            file_url: "https://example.invalid/image.jpg".into(),
+            ..Post::default()
+        };
         let expected = PathBuf::from("/tmp/prefetched.jpg");
         let task = tokio::spawn({
             let path = expected.clone();
@@ -2080,13 +2138,42 @@ mod tests {
             },
         ];
 
-        let active = active_download_entries(&entries);
-        assert_eq!(active.len(), 3);
-        let summary = format_download_progress(&active);
+        let visible = visible_download_entries(&entries);
+        assert_eq!(visible.len(), 3);
+        let summary = format_download_progress(&visible);
         assert!(summary.contains("#1: 50%"));
         assert!(summary.contains("#2: queued"));
         assert!(summary.contains("#3: 25%"));
         assert!(!summary.contains("#4:"));
+
+        let unknown_total = DownloadEntry {
+            post_id: 9,
+            status: DownloadStatus::Downloading,
+            progress: 0,
+            total: 0,
+            bytes: 2048,
+            error: None,
+        };
+        let text = format_download_progress(&[&unknown_total]);
+        assert_eq!(text, "#9: 2.0 KB");
+        assert!(!text.contains("KBB"), "{text}");
+    }
+
+    #[test]
+    fn finished_download_notice_is_combined_with_live_progress() {
+        assert_eq!(combine_download_status("Saved file", &[]), "Saved file");
+
+        let entry = DownloadEntry {
+            post_id: 4,
+            status: DownloadStatus::Downloading,
+            progress: 10,
+            total: 100,
+            bytes: 10,
+            error: None,
+        };
+        let summary = combine_download_status("Saved file", &[&entry]);
+        assert!(summary.starts_with("Saved file"));
+        assert!(summary.contains("#4:"));
     }
 
     #[tokio::test]
@@ -2107,11 +2194,13 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("42_preview.png");
-        let mut post = Post::default();
-        post.id = 42;
-        post.file_url = format!("{}/image.png", server.uri());
-        post.width = 800;
-        post.height = 600;
+        let post = Post {
+            id: 42,
+            file_url: format!("{}/image.png", server.uri()),
+            width: 800,
+            height: 600,
+            ..Post::default()
+        };
 
         let (path, _) = fetch_preview_to(&post, &target).await.unwrap();
         assert_eq!(path, target);

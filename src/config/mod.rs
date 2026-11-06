@@ -106,7 +106,7 @@ impl Default for SearchConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -116,6 +116,15 @@ pub struct WatchConfig {
 
 fn default_interval() -> u64 {
     300
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval: default_interval(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,5 +215,35 @@ impl Config {
                 self.downloads.concurrency = n;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_usable() {
+        let cfg = Config::default();
+        assert_eq!(cfg.watch.interval, 300);
+        assert_eq!(cfg.search.page_size, 100);
+        assert_eq!(cfg.search.default_limit, 100);
+        assert_eq!(cfg.downloads.concurrency, 16);
+        assert!(cfg.database.enabled);
+    }
+
+    #[test]
+    fn partial_watch_section_keeps_the_default_interval() {
+        let cfg: Config = toml::from_str("[watch]\nenabled = true\n").unwrap();
+        assert!(cfg.watch.enabled);
+        assert_eq!(cfg.watch.interval, 300);
+    }
+
+    #[test]
+    fn partial_search_section_keeps_the_defaults() {
+        let cfg: Config = toml::from_str("[search]\ndefault_rating = \"explicit\"\n").unwrap();
+        assert_eq!(cfg.search.default_rating, "explicit");
+        assert_eq!(cfg.search.default_limit, 100);
+        assert_eq!(cfg.search.page_size, 100);
     }
 }

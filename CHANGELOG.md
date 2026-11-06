@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-11-05
+
+Compare: [`v0.2.3...v0.2.4`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.3...v0.2.4)
+
+A correctness and polish release: search limits now count matching posts, batch
+and watch errors stay visible, and downloads no longer corrupt or lose files in
+several edge cases.
+
+### Added
+
+- `download`, `batch`, and `preset run` honour the global `--json` flag and
+  print structured results.
+- `--quiet` suppresses progress bars and the search result total.
+- The REPL gains `download <id|tags>` and `presets`; `config` prints TOML.
+- Batch searches run concurrently, report failures per tag, and exit non-zero
+  when any tag group fails.
+- Watch retries failed downloads on later polls instead of skipping them.
+- The TUI quits with `Ctrl+C` and shows the result of a finished quick download
+  next to the live queue.
+
+### Changed
+
+- `--limit` counts posts that pass the configured filters, and the API page
+  size is capped at 100 so paging offsets stay correct.
+- CLI `--limit` and `watch --interval` fall back to the configured defaults;
+  the TUI cycles only through 25, 50, and 100 results per page.
+- TUI page changes restart an active search on page 1.
+- Download, history, and queue sizes use consistent binary units.
+- The `safe` default rating is sent as `rating:general`; an explicit
+  `rating:` tag or `--rating all` disables the default.
+
+### Fixed
+
+- Overlapping batch tags or repeated post ids no longer race on the same
+  `.part` file.
+- Falling back from a failed full-size download to a sample no longer resumes
+  the sample against the wrong partial bytes.
+- A hash duplicate no longer deletes the only remaining copy when the old
+  history path is missing.
+- Manual redirects are capped, and an unexpected `206` response no longer
+  duplicates the start of a file.
+- TUI tag truncation no longer panics on multibyte UTF-8, and slow search
+  responses cannot overwrite newer results.
+- History migration is transactional and recovers a stranded
+  `downloads_legacy` table.
+- History CSV export includes a header, escapes commas/quotes/newlines, and
+  honours `--search`.
+- `Post::extension()` reads only the URL path, not the hostname or query.
+- `WatchConfig::default()` now uses the same 300-second interval as the config
+  file default.
+
 ## [0.2.3] - 2026-11-04
 
 Compare: [`v0.2.2...v0.2.3`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.2...v0.2.3)

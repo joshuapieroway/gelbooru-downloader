@@ -9,6 +9,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use indicatif::ProgressBar;
 use reqwest::Client;
+use serde::Serialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DownloadOutcome {
     pub post_id: i64,
     pub path: PathBuf,
@@ -24,6 +26,44 @@ pub struct DownloadOutcome {
     pub hash: String,
     pub skipped: bool,
     pub error: Option<String>,
+}
+
+impl DownloadOutcome {
+    /// One-line human-readable result, used by the CLI and quick downloads.
+    pub fn summary(&self) -> String {
+        if let Some(error) = &self.error {
+            return format!("Post #{}: {}", self.post_id, error);
+        }
+        if self.skipped {
+            return format!(
+                "Post #{} already downloaded: {}",
+                self.post_id,
+                self.path.display()
+            );
+        }
+        format!(
+            "Post #{} saved to {} ({})",
+            self.post_id,
+            self.path.display(),
+            human_bytes(self.size)
+        )
+    }
+}
+
+/// Format a byte count with binary units, e.g. `1.5 MB`.
+pub fn human_bytes(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if n >= GB {
+        format!("{:.1} GB", n as f64 / GB as f64)
+    } else if n >= MB {
+        format!("{:.1} MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.1} KB", n as f64 / KB as f64)
+    } else {
+        format!("{n} B")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +98,14 @@ impl DownloadQueue {
 
     pub async fn add_queued(&self, post_id: i64) -> usize {
         let mut entries = self.entries.lock().await;
+        // Finished entries are only useful as temporary feedback. Drop them so
+        // the queue does not grow without bound during a long viewer session.
+        entries.retain(|e| {
+            !matches!(
+                e.status,
+                DownloadStatus::Completed | DownloadStatus::Failed | DownloadStatus::Cancelled
+            )
+        });
         entries.push(DownloadEntry {
             post_id,
             status: DownloadStatus::Queued,
@@ -82,38 +130,29 @@ impl DownloadQueue {
 
     pub async fn set_status(&self, post_id: i64, status: DownloadStatus) {
         let mut entries = self.entries.lock().await;
-        for e in entries.iter_mut() {
-            if e.post_id == post_id {
-                e.status = status;
-                break;
-            }
+        for e in entries.iter_mut().filter(|e| e.post_id == post_id) {
+            e.status = status;
         }
     }
 
     pub async fn set_progress(&self, post_id: i64, progress: usize, bytes: u64) {
         let mut entries = self.entries.lock().await;
-        for e in entries.iter_mut() {
-            if e.post_id == post_id {
-                e.progress = progress;
-                e.bytes = bytes;
-                break;
-            }
+        for e in entries.iter_mut().filter(|e| e.post_id == post_id) {
+            e.progress = progress;
+            e.bytes = bytes;
         }
     }
 
     pub async fn set_error(&self, post_id: i64, error: Option<String>) {
         let mut entries = self.entries.lock().await;
-        for e in entries.iter_mut() {
-            if e.post_id == post_id {
-                e.error = error.clone();
-                if let Some(message) = &error {
-                    e.status = if message == "cancelled" {
-                        DownloadStatus::Cancelled
-                    } else {
-                        DownloadStatus::Failed
-                    };
-                }
-                break;
+        for e in entries.iter_mut().filter(|e| e.post_id == post_id) {
+            e.error = error.clone();
+            if let Some(message) = &error {
+                e.status = if message.to_ascii_lowercase().contains("cancel") {
+                    DownloadStatus::Cancelled
+                } else {
+                    DownloadStatus::Failed
+                };
             }
         }
     }
@@ -338,22 +377,20 @@ impl DownloadEngine {
             }
         }
         // if file already exists on disk, skip
-        if final_path.exists() {
-            if self.config.downloads.skip_duplicates {
-                if let Some(queue) = &self.queue {
-                    queue.set_status(post_id, DownloadStatus::Completed).await;
-                }
-                let mut st = self.stats.lock().await;
-                st.skipped += 1;
-                return DownloadOutcome {
-                    post_id: post.id,
-                    path: final_path,
-                    size: 0,
-                    hash: String::new(),
-                    skipped: true,
-                    error: None,
-                };
+        if final_path.exists() && self.config.downloads.skip_duplicates {
+            if let Some(queue) = &self.queue {
+                queue.set_status(post_id, DownloadStatus::Completed).await;
             }
+            let mut st = self.stats.lock().await;
+            st.skipped += 1;
+            return DownloadOutcome {
+                post_id: post.id,
+                path: final_path,
+                size: 0,
+                hash: String::new(),
+                skipped: true,
+                error: None,
+            };
         }
 
         let url = post.file_url.clone();
@@ -435,6 +472,12 @@ impl DownloadEngine {
             };
 
             if let Some(next_url) = next_url {
+                // A different URL may serve different bytes (the sample is a
+                // re-encoded image), so the partial file from the previous
+                // attempt cannot be resumed.
+                if next_url != current_url {
+                    let _ = tokio::fs::remove_file(&part_path).await;
+                }
                 current_url = next_url.clone();
                 result = self
                     .download_file(&next_url, &final_path, &part_path, post_id, expected_size)
@@ -450,22 +493,27 @@ impl DownloadEngine {
                 // duplicate by hash
                 if self.config.downloads.skip_duplicates {
                     if let Some(db) = &self.db {
-                        if db.exists_hash(&hash).await.unwrap_or(false) {
-                            // remove file? keep but mark duplicate? We'll delete to avoid dup
-                            let _ = tokio::fs::remove_file(&final_path).await;
-                            if let Some(queue) = &self.queue {
-                                queue.set_status(post_id, DownloadStatus::Completed).await;
+                        // Only drop the new file when the already-recorded copy
+                        // still exists on disk. A stale history row must not
+                        // cost the user the file they just downloaded.
+                        if let Some(existing) = db.hash_path(&hash).await.unwrap_or(None) {
+                            let existing_path = PathBuf::from(&existing);
+                            if existing_path != final_path && existing_path.exists() {
+                                let _ = tokio::fs::remove_file(&final_path).await;
+                                if let Some(queue) = &self.queue {
+                                    queue.set_status(post_id, DownloadStatus::Completed).await;
+                                }
+                                let mut st = self.stats.lock().await;
+                                st.skipped += 1;
+                                return DownloadOutcome {
+                                    post_id: post.id,
+                                    path: existing_path,
+                                    size,
+                                    hash,
+                                    skipped: true,
+                                    error: None,
+                                };
                             }
-                            let mut st = self.stats.lock().await;
-                            st.skipped += 1;
-                            return DownloadOutcome {
-                                post_id: post.id,
-                                path: final_path,
-                                size,
-                                hash,
-                                skipped: true,
-                                error: None,
-                            };
                         }
                     }
                 }
@@ -571,7 +619,11 @@ impl DownloadEngine {
         // Manual redirect handling so the Referer header is preserved (Gelbooru hotlink protection).
         let mut current_url = url.to_string();
         let mut total_size: Option<u64> = None;
+        let mut redirects = 0u32;
         let resp = loop {
+            if self.cancel.is_cancelled() {
+                return Err(AppError::Cancelled);
+            }
             let mut req = self
                 .client
                 .get(&current_url)
@@ -585,6 +637,10 @@ impl DownloadEngine {
                 .map_err(|e| AppError::Http(e.to_string()))?;
             if r.status().is_redirection() {
                 if let Some(loc) = r.headers().get(reqwest::header::LOCATION) {
+                    redirects += 1;
+                    if redirects > 10 {
+                        return Err(AppError::Http("too many redirects".into()));
+                    }
                     let loc = loc.to_str().unwrap_or("").to_string();
                     if loc.starts_with("http") {
                         current_url = loc;
@@ -615,9 +671,12 @@ impl DownloadEngine {
         }
 
         // Content-type check - keep for reliability
-        if let Some(ct) = resp.headers().get(CONTENT_TYPE) {
-            let cts = ct.to_str().unwrap_or("");
-            if self.config.downloads.validate_files {
+        if self.config.downloads.validate_files {
+            if let Some(cts) = resp
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|ct| ct.to_str().ok())
+            {
                 if !(cts.starts_with("image/")
                     || cts.starts_with("video/")
                     || cts == "application/octet-stream")
@@ -627,15 +686,21 @@ impl DownloadEngine {
             }
         }
 
+        // A 206 response reports only the remaining bytes; the full size also
+        // includes the part that was already on disk.
+        let resumed = status.as_u16() == 206 && resume_from > 0;
+        if resumed {
+            if let Some(size) = total_size.as_mut() {
+                *size += resume_from;
+            }
+        }
+
         // Update total size in queue if we know it
         if let Some(q) = &queue {
             if let Some(size) = total_size {
                 let mut entries = q.entries.lock().await;
-                for e in entries.iter_mut() {
-                    if e.post_id == post_id {
-                        e.total = size;
-                        break;
-                    }
+                for e in entries.iter_mut().filter(|e| e.post_id == post_id) {
+                    e.total = size;
                 }
             }
         }
@@ -652,7 +717,7 @@ impl DownloadEngine {
         let mut total = resume_from;
 
         // For resume: hash existing partial file content for correct final hash
-        if status.as_u16() == 206 && resume_from > 0 {
+        if resumed {
             if let Ok(mut partial) = tokio::fs::File::open(part_path).await {
                 use tokio::io::AsyncReadExt;
                 let mut buf = vec![0u8; 8192];
@@ -670,7 +735,10 @@ impl DownloadEngine {
             }
         }
 
-        let mut file = if status.as_u16() == 206 {
+        // Only honour a 206 when a range was actually requested. Some servers
+        // return 206 for ordinary requests, and appending in that case would
+        // duplicate the beginning of the file.
+        let mut file = if resumed {
             tokio::fs::OpenOptions::new()
                 .append(true)
                 .open(part_path)
@@ -698,11 +766,10 @@ impl DownloadEngine {
                 pb.inc(chunk.len() as u64);
             }
             if let Some(limit) = bandwidth {
-                if limit > 0 {
-                    let delay = std::time::Duration::from_millis(
-                        (chunk.len() as u64 * 1000 / limit).max(1),
-                    );
-                    tokio::time::sleep(delay).await;
+                // A zero limit means unlimited, so `checked_div` also handles
+                // the disabling case without a separate guard.
+                if let Some(delay_ms) = (chunk.len() as u64 * 1000).checked_div(limit) {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms.max(1))).await;
                 }
             }
 
@@ -757,6 +824,14 @@ impl DownloadEngine {
         output_dir: Option<PathBuf>,
         progress: Option<ProgressBar>,
     ) -> Vec<DownloadOutcome> {
+        // Duplicate post ids (overlapping pages, overlapping batch tags, or
+        // repeated lines in a batch file) would otherwise race on the same
+        // `.part` path and corrupt each other's output.
+        let mut seen = HashSet::new();
+        let posts: Vec<Post> = posts
+            .into_iter()
+            .filter(|p| p.id == 0 || seen.insert(p.id))
+            .collect();
         let total_files = posts.len();
         // The API reports each post's size, so the bar can track real bytes
         // instead of only completed files. If no sizes are known at all we
@@ -882,13 +957,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finished_queue_entries_are_evicted_on_the_next_add() {
+        let queue = DownloadQueue::new();
+        queue.add_queued(1).await;
+        queue.set_status(1, DownloadStatus::Completed).await;
+        queue.add_queued(2).await;
+
+        let entries = queue.entries().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].post_id, 2);
+        assert_eq!(entries[0].status, DownloadStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn queue_updates_every_matching_entry() {
+        let queue = DownloadQueue::new();
+        queue.add_queued(1).await;
+        queue.add_queued(1).await;
+        queue.set_status(1, DownloadStatus::Downloading).await;
+        queue.set_progress(1, 42, 1024).await;
+
+        for entry in queue.entries().await {
+            assert_eq!(entry.status, DownloadStatus::Downloading);
+            assert_eq!(entry.progress, 42);
+            assert_eq!(entry.bytes, 1024);
+        }
+    }
+
+    #[tokio::test]
     async fn queue_errors_become_terminal_states() {
         let queue = DownloadQueue::new();
         queue.add_queued(1).await;
         queue.add_queued(2).await;
 
         queue.set_error(1, Some("HTTP 500".into())).await;
-        queue.set_error(2, Some("cancelled".into())).await;
+        queue.set_error(2, Some("Cancelled".into())).await;
 
         let entries = queue.entries().await;
         assert_eq!(entries[0].status, DownloadStatus::Failed);

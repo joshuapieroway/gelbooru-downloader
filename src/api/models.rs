@@ -53,16 +53,27 @@ impl Post {
             .collect()
     }
     pub fn extension(&self) -> String {
-        // derive from file_url
-        let url = &self.file_url;
-        if let Some(idx) = url.rfind('.') {
-            let ext = &url[idx + 1..];
-            let ext = ext.split('?').next().unwrap_or(ext);
-            if ext.len() <= 5 {
-                return ext.to_lowercase();
-            }
+        // Take the extension from the URL path only, not from the hostname or
+        // query string (`http://x.co/a` must not yield `co/a`).
+        let path = url::Url::parse(&self.file_url)
+            .ok()
+            .map(|u| u.path().to_string())
+            .unwrap_or_else(|| {
+                self.file_url
+                    .split(['?', '#'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            });
+        let ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        if !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+            ext.to_ascii_lowercase()
+        } else {
+            String::new()
         }
-        String::new()
     }
 }
 
@@ -144,8 +155,21 @@ mod tests {
     }
     #[test]
     fn extension() {
-        let mut p = Post::default();
-        p.file_url = "http://x/y.jpeg?z=1".to_string();
+        let mut p = Post {
+            file_url: "http://x/y.jpeg?z=1".to_string(),
+            ..Post::default()
+        };
         assert_eq!(p.extension(), "jpeg");
+
+        p.file_url = "https://img4.gelbooru.com/images/ab/cd/123.PNG".to_string();
+        assert_eq!(p.extension(), "png");
+
+        // Short TLDs and dots in the path are not file extensions.
+        p.file_url = "http://x.co/a".to_string();
+        assert_eq!(p.extension(), "");
+        p.file_url = "http://x/a.b".to_string();
+        assert_eq!(p.extension(), "b");
+        p.file_url = String::new();
+        assert_eq!(p.extension(), "");
     }
 }

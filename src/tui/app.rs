@@ -2,8 +2,10 @@ use crate::api::client::GelbooruClient;
 use crate::api::models::Post;
 use crate::config::Config;
 use crate::database::history::HistoryDb;
+use crate::downloader::engine::human_bytes;
 use crate::downloader::progress::{self, ProgressSnapshot};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
+use crate::utils::truncate_chars;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -64,6 +66,9 @@ struct AppState {
     search_page: usize,
     search_per_page: usize,
     search_total: i64,
+    /// Monotonic id for the latest search request. Out-of-order responses are
+    /// ignored so a slow first page cannot overwrite a newer page or query.
+    search_seq: u64,
     jobs: Vec<QueueJob>,
     prog_bytes: u64,
     prog_failed: usize,
@@ -93,6 +98,7 @@ impl AppState {
             search_page: 1,
             search_per_page: 50,
             search_total: 0,
+            search_seq: 0,
             jobs: Vec::new(),
             prog_bytes: 0,
             prog_failed: 0,
@@ -190,6 +196,227 @@ impl AppState {
     }
 }
 
+/// Restore the terminal even when the TUI exits through an error path.
+struct ScreenGuard;
+
+impl Drop for ScreenGuard {
+    fn drop(&mut self) {
+        disable_raw_mode().ok();
+        execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        )
+        .ok();
+    }
+}
+
+/// Start (or restart) a search for the current query on `page`. Responses are
+/// tagged with a sequence number so stale requests cannot overwrite newer
+/// results when the user pages quickly or changes the page size.
+fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
+    let page = page.max(1);
+    let (client, query, per_page, seq) = {
+        let mut st = state.lock().unwrap();
+        st.search_seq = st.search_seq.wrapping_add(1);
+        st.searching = true;
+        st.search_error = None;
+        st.results.clear();
+        st.scroll = 0;
+        st.search_page = page;
+        (
+            st.client.clone(),
+            st.query.trim().to_string(),
+            st.search_per_page,
+            st.search_seq,
+        )
+    };
+
+    let Some(client) = client else {
+        let mut st = state.lock().unwrap();
+        if st.search_seq == seq {
+            st.searching = false;
+            st.search_error = Some("No API client".to_string());
+        }
+        return;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let result = client
+            .search_page(&query, per_page as u32, page as u32, None, None)
+            .await;
+        let mut st = state.lock().unwrap();
+        if st.search_seq != seq {
+            return;
+        }
+        st.searching = false;
+        match result {
+            Ok((posts, total)) => {
+                st.results = posts;
+                st.search_total = total;
+                st.search_page = page;
+                st.clamp_search_scroll();
+                st.search_error = if st.results.is_empty() {
+                    Some("No results".to_string())
+                } else {
+                    None
+                };
+            }
+            Err(e) => {
+                st.results.clear();
+                st.search_total = 0;
+                st.search_error = Some(e.to_string());
+            }
+        }
+    });
+}
+
+fn total_search_pages(total: i64, per_page: usize) -> usize {
+    ((total.max(0) as usize + per_page.max(1) - 1) / per_page.max(1)).max(1)
+}
+
+/// Work that must happen after the state mutex is released.
+enum UiAction {
+    None,
+    Quit,
+    Search(usize),
+    View(crate::tui::viewer::ViewerRequest),
+}
+
+/// Apply a key press to the UI state. Any network work is returned as an
+/// action so the caller can await it without holding the state mutex.
+fn handle_key(st: &mut AppState, code: KeyCode) -> UiAction {
+    match st.mode {
+        Mode::SearchInput => {
+            match code {
+                KeyCode::Esc => st.mode = Mode::Normal,
+                KeyCode::Enter => {
+                    st.mode = Mode::Normal;
+                    if !st.query.trim().is_empty() {
+                        return UiAction::Search(1);
+                    }
+                }
+                KeyCode::Backspace => {
+                    st.query.pop();
+                }
+                KeyCode::Char(c) => st.query.push(c),
+                _ => {}
+            }
+            UiAction::None
+        }
+        Mode::Normal => match code {
+            KeyCode::Char('q') | KeyCode::Esc => UiAction::Quit,
+            KeyCode::Tab | KeyCode::Right => {
+                st.tab = (st.tab + 1) % TABS.len();
+                st.scroll = 0;
+                UiAction::None
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                st.tab = (st.tab + TABS.len() - 1) % TABS.len();
+                st.scroll = 0;
+                UiAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if st.tab == 0 {
+                    st.scroll = st
+                        .scroll
+                        .saturating_add(1)
+                        .min(st.results.len().saturating_sub(1));
+                } else {
+                    st.scroll = st.scroll.saturating_add(1);
+                }
+                UiAction::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                st.scroll = st.scroll.saturating_sub(1);
+                UiAction::None
+            }
+            KeyCode::Char('/') => {
+                if st.tab == 0 {
+                    st.mode = Mode::SearchInput;
+                }
+                UiAction::None
+            }
+            KeyCode::Char('1') => {
+                st.tab = 0;
+                st.scroll = 0;
+                UiAction::None
+            }
+            KeyCode::Char('2') => {
+                st.tab = 1;
+                st.scroll = 0;
+                UiAction::None
+            }
+            KeyCode::Char('3') => {
+                st.tab = 2;
+                st.scroll = 0;
+                UiAction::None
+            }
+            KeyCode::Char('4') => {
+                st.tab = 3;
+                st.scroll = 0;
+                UiAction::None
+            }
+            KeyCode::Char('n') => {
+                if st.tab == 0 && !st.results.is_empty() {
+                    let pages = total_search_pages(st.search_total, st.search_per_page);
+                    if st.search_page < pages {
+                        return UiAction::Search(st.search_page + 1);
+                    }
+                }
+                UiAction::None
+            }
+            KeyCode::Char('p') => {
+                if st.tab == 0 && st.search_page > 1 {
+                    return UiAction::Search(st.search_page - 1);
+                }
+                UiAction::None
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') if st.tab == 0 => {
+                let next = match st.search_per_page {
+                    25 => 50,
+                    50 => 100,
+                    _ => 100,
+                };
+                if next != st.search_per_page {
+                    st.search_per_page = next;
+                    if !st.query.trim().is_empty() {
+                        return UiAction::Search(1);
+                    }
+                }
+                UiAction::None
+            }
+            KeyCode::Char('-') if st.tab == 0 => {
+                let next = match st.search_per_page {
+                    100 => 50,
+                    50 => 25,
+                    _ => 25,
+                };
+                if next != st.search_per_page {
+                    st.search_per_page = next;
+                    if !st.query.trim().is_empty() {
+                        return UiAction::Search(1);
+                    }
+                }
+                UiAction::None
+            }
+            KeyCode::Char('v') | KeyCode::Enter if st.tab == 0 && !st.results.is_empty() => {
+                UiAction::View(crate::tui::viewer::ViewerRequest {
+                    posts: st.results.clone(),
+                    start: st.scroll.min(st.results.len().saturating_sub(1)),
+                    db: st.db.clone(),
+                    client: st.client.clone(),
+                    query: st.query.clone(),
+                    per_page: st.search_per_page,
+                    page: st.search_page,
+                    total: st.search_total,
+                })
+            }
+            _ => UiAction::None,
+        },
+    }
+}
+
 pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
     let db = if cfg.database.enabled {
         HistoryDb::open(&cfg.db_path()).ok().map(Arc::new)
@@ -206,26 +433,44 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
         EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     )?;
+    let _guard = ScreenGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     loop {
-        {
-            let mut st = state.lock().unwrap();
-            if st.last_poll.elapsed() >= TokioDuration::from_secs(1) {
-                let db = st.db.clone();
-                if let Some(db) = db {
-                    if let Ok(c) = db.count().await {
-                        st.completed = c;
-                    }
-                    if let Ok(h) = db.list(20, None).await {
-                        st.history = h;
-                    }
+        let poll_due = {
+            let st = state.lock().unwrap();
+            st.last_poll.elapsed() >= TokioDuration::from_secs(1)
+        };
+        if poll_due {
+            // Never hold the state mutex across an await: DB work runs on a
+            // blocking thread and search callbacks need the lock to publish
+            // their results.
+            let db = state.lock().unwrap().db.clone();
+            let mut completed = None;
+            let mut history = None;
+            if let Some(db) = db {
+                if let Ok(c) = db.count().await {
+                    completed = Some(c);
                 }
-                let snapshots = progress::read_snapshots();
-                st.update_jobs(snapshots, Instant::now());
-                st.last_poll = Instant::now();
+                if let Ok(h) = db.list(20, None).await {
+                    history = Some(h);
+                }
             }
+            let snapshots = progress::read_snapshots();
+            let now = Instant::now();
+            let mut st = state.lock().unwrap();
+            if let Some(c) = completed {
+                st.completed = c;
+            }
+            if let Some(h) = history {
+                st.history = h;
+            }
+            st.update_jobs(snapshots, now);
+            st.last_poll = now;
+            st.tick = st.tick.wrapping_add(1);
+        } else {
+            let mut st = state.lock().unwrap();
             st.tick = st.tick.wrapping_add(1);
         }
 
@@ -237,247 +482,38 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(k) => {
-                    if k.kind != KeyEventKind::Press { /* skip */
-                    } else {
+                    if k.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if k.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(k.code, KeyCode::Char('c'))
+                    {
+                        return Ok(());
+                    }
+                    let action = {
                         let mut st = state.lock().unwrap();
-                        match st.mode {
-                            Mode::SearchInput => match k.code {
-                                KeyCode::Esc => {
-                                    st.mode = Mode::Normal;
-                                }
-                                KeyCode::Enter => {
-                                    let q = st.query.clone();
-                                    let per_page = st.search_per_page;
-                                    st.mode = Mode::Normal;
-                                    if !q.trim().is_empty() {
-                                        st.searching = true;
-                                        st.results.clear();
-                                        st.search_error = None;
-                                        st.search_page = 1;
-                                        let state2 = state.clone();
-                                        let client = st.client.clone();
-                                        if let Some(client) = client {
-                                            tokio::spawn(async move {
-                                                let (posts, total) = client
-                                                    .search_page(&q, per_page as u32, 1, None, None)
-                                                    .await
-                                                    .unwrap_or((Vec::new(), 0));
-                                                let mut st = state2.lock().unwrap();
-                                                st.searching = false;
-                                                st.results = posts;
-                                                st.clamp_search_scroll();
-                                                st.search_total = total;
-                                                st.search_page = 1;
-                                                st.search_per_page = per_page;
-                                                if st.results.is_empty() && total == 0 {
-                                                    st.search_error =
-                                                        Some("No results".to_string());
-                                                }
-                                            });
-                                        } else {
-                                            st.searching = false;
-                                            st.search_error = Some("No API client".to_string());
-                                        }
-                                    }
-                                }
-                                KeyCode::Backspace => {
-                                    st.query.pop();
-                                }
-                                KeyCode::Char(c) => {
-                                    st.query.push(c);
-                                }
-                                _ => {}
-                            },
-                            Mode::Normal => match k.code {
-                                KeyCode::Char('q') | KeyCode::Esc => {
-                                    drop(st);
-                                    disable_raw_mode().ok();
-                                    execute!(
-                                        io::stdout(),
-                                        LeaveAlternateScreen,
-                                        crossterm::event::DisableMouseCapture
-                                    )
-                                    .ok();
-                                    return Ok(());
-                                }
-                                KeyCode::Tab | KeyCode::Right => {
-                                    st.tab = (st.tab + 1) % TABS.len();
-                                    st.scroll = 0;
-                                }
-                                KeyCode::BackTab | KeyCode::Left => {
-                                    st.tab = (st.tab + TABS.len() - 1) % TABS.len();
-                                    st.scroll = 0;
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    if st.tab == 0 {
-                                        st.scroll = st
-                                            .scroll
-                                            .saturating_add(1)
-                                            .min(st.results.len().saturating_sub(1));
-                                    } else {
-                                        st.scroll = st.scroll.saturating_add(1);
-                                    }
-                                }
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    st.scroll = st.scroll.saturating_sub(1);
-                                }
-                                KeyCode::Char('/') => {
-                                    if st.tab == 0 {
-                                        st.mode = Mode::SearchInput;
-                                    }
-                                }
-                                KeyCode::Char('1') => {
-                                    st.tab = 0;
-                                    st.scroll = 0;
-                                }
-                                KeyCode::Char('2') => {
-                                    st.tab = 1;
-                                    st.scroll = 0;
-                                }
-                                KeyCode::Char('3') => {
-                                    st.tab = 2;
-                                    st.scroll = 0;
-                                }
-                                KeyCode::Char('4') => {
-                                    st.tab = 3;
-                                    st.scroll = 0;
-                                }
-                                KeyCode::Char('n') => {
-                                    if st.tab == 0 && !st.results.is_empty() {
-                                        let total_pages =
-                                            ((st.search_total as usize + st.search_per_page - 1)
-                                                / st.search_per_page)
-                                                .max(1);
-                                        if st.search_page < total_pages {
-                                            st.search_page += 1;
-                                            st.searching = true;
-                                            st.results.clear();
-                                            let state2 = state.clone();
-                                            let client = st.client.clone();
-                                            let q = st.query.clone();
-                                            let page = st.search_page;
-                                            let per_page = st.search_per_page;
-                                            if let Some(client) = client {
-                                                tokio::spawn(async move {
-                                                    let (posts, total) = client
-                                                        .search_page(
-                                                            &q,
-                                                            per_page as u32,
-                                                            page as u32,
-                                                            None,
-                                                            None,
-                                                        )
-                                                        .await
-                                                        .unwrap_or((Vec::new(), 0));
-                                                    let mut st = state2.lock().unwrap();
-                                                    st.searching = false;
-                                                    st.results = posts;
-                                                    st.clamp_search_scroll();
-                                                    st.search_total = total;
-                                                    st.search_page = page;
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('p') => {
-                                    if st.tab == 0 && st.search_page > 1 {
-                                        st.search_page -= 1;
-                                        st.searching = true;
-                                        st.results.clear();
-                                        let state2 = state.clone();
-                                        let client = st.client.clone();
-                                        let q = st.query.clone();
-                                        let page = st.search_page;
-                                        let per_page = st.search_per_page;
-                                        if let Some(client) = client {
-                                            tokio::spawn(async move {
-                                                let (posts, total) = client
-                                                    .search_page(
-                                                        &q,
-                                                        per_page as u32,
-                                                        page as u32,
-                                                        None,
-                                                        None,
-                                                    )
-                                                    .await
-                                                    .unwrap_or((Vec::new(), 0));
-                                                let mut st = state2.lock().unwrap();
-                                                st.searching = false;
-                                                st.results = posts;
-                                                st.clamp_search_scroll();
-                                                st.search_total = total;
-                                                st.search_page = page;
-                                            });
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('+') | KeyCode::Char('=') => {
-                                    if st.tab == 0 {
-                                        st.search_per_page = match st.search_per_page {
-                                            25 => 50,
-                                            50 => 100,
-                                            100 => 200,
-                                            _ => 200,
-                                        };
-                                    }
-                                }
-                                KeyCode::Char('-') => {
-                                    if st.tab == 0 {
-                                        st.search_per_page = match st.search_per_page {
-                                            200 => 100,
-                                            100 => 50,
-                                            50 => 25,
-                                            _ => 25,
-                                        };
-                                    }
-                                }
-                                KeyCode::Char('v') | KeyCode::Enter => {
-                                    if st.tab == 0 && !st.results.is_empty() {
-                                        let idx = st.scroll.min(st.results.len().saturating_sub(1));
-                                        let posts = st.results.clone();
-                                        let db = st.db.clone();
-                                        let client = st.client.clone();
-                                        let query = st.query.clone();
-                                        let search_per_page = st.search_per_page;
-                                        let search_page = st.search_page;
-                                        let search_total = st.search_total;
-                                        drop(st);
-                                        crate::tui::viewer::show(
-                                            &mut terminal,
-                                            &posts,
-                                            idx,
-                                            &cfg,
-                                            db,
-                                            client,
-                                            query,
-                                            search_per_page,
-                                            search_page,
-                                            search_total,
-                                        )
-                                        .await;
-                                    }
-                                }
-                                _ => {}
-                            },
+                        handle_key(&mut st, k.code)
+                    };
+                    match action {
+                        UiAction::Quit => return Ok(()),
+                        UiAction::Search(page) => begin_search(&state, page),
+                        UiAction::View(req) => {
+                            crate::tui::viewer::show(&mut terminal, &cfg, req).await;
                         }
+                        UiAction::None => {}
                     }
                 }
                 Event::Mouse(m) => {
                     let mut st = state.lock().unwrap();
                     match m.kind {
-                        MouseEventKind::ScrollUp => {
-                            if st.tab == 0 {
-                                st.scroll = st.scroll.saturating_sub(3);
-                            }
+                        MouseEventKind::ScrollUp if st.tab == 0 => {
+                            st.scroll = st.scroll.saturating_sub(3);
                         }
-                        MouseEventKind::ScrollDown => {
-                            if st.tab == 0 {
-                                st.scroll = st
-                                    .scroll
-                                    .saturating_add(3)
-                                    .min(st.results.len().saturating_sub(1));
-                            }
+                        MouseEventKind::ScrollDown if st.tab == 0 => {
+                            st.scroll = st
+                                .scroll
+                                .saturating_add(3)
+                                .min(st.results.len().saturating_sub(1));
                         }
                         _ => {}
                     }
@@ -632,11 +668,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                         .style(Style::default().fg(rating_color(&p.rating))),
                     Cell::from(format!("{}x{}", p.width, p.height)),
                     Cell::from(p.score.to_string()),
-                    Cell::from(if p.tags.len() > 60 {
-                        format!("{}…", &p.tags[..60])
-                    } else {
-                        p.tags.clone()
-                    }),
+                    Cell::from(truncate_chars(&p.tags, 60)),
                 ])
                 .style(style)
             })
@@ -664,8 +696,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     "Search Results ({})  Page {}/{}  Per page {}",
                     app.results.len(),
                     app.search_page,
-                    ((app.search_total as usize + app.search_per_page - 1) / app.search_per_page)
-                        .max(1),
+                    total_search_pages(app.search_total, app.search_per_page),
                     app.search_per_page
                 ))
                 .border_style(Style::default().fg(Color::DarkGray)),
@@ -862,7 +893,7 @@ fn draw_history(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     Cell::from(r.status.clone()),
                     Cell::from(r.rating.clone())
                         .style(Style::default().fg(rating_color(&r.rating))),
-                    Cell::from(format!("{} KB", r.file_size / 1024)),
+                    Cell::from(human_bytes(r.file_size.max(0) as u64)),
                     Cell::from(r.local_path.clone()),
                 ])
             })
@@ -898,15 +929,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         .constraints([Constraint::Length(8), Constraint::Min(4)])
         .split(area);
 
-    let bytes_str = if app.prog_bytes >= 1_073_741_824 {
-        format!("{:.2} GB", app.prog_bytes as f64 / 1_073_741_824.0)
-    } else if app.prog_bytes >= 1_048_576 {
-        format!("{:.2} MB", app.prog_bytes as f64 / 1_048_576.0)
-    } else if app.prog_bytes >= 1024 {
-        format!("{:.1} KB", app.prog_bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", app.prog_bytes)
-    };
+    let bytes_str = human_bytes(app.prog_bytes);
     let stats_text = vec![
         Line::from(vec![
             Span::styled(

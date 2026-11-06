@@ -46,6 +46,7 @@ pub async fn run(ctx: ReplContext) -> Result<()> {
                                 page_size: ctx.config.search.page_size,
                                 sort: None,
                                 order: None,
+                                filters: crate::filters::rules::FilterRules::default(),
                             },
                         )
                         .await
@@ -60,6 +61,44 @@ pub async fn run(ctx: ReplContext) -> Result<()> {
                                 println!("Total: {}", posts.len());
                             }
                             Err(e) => println!("Error: {}", e),
+                        }
+                    }
+                    ["download", rest @ ..] if !rest.is_empty() => {
+                        let target = rest.join(" ");
+                        let engine = crate::downloader::engine::DownloadEngine::new(
+                            ctx.config.clone(),
+                            Some(ctx.db.clone()),
+                        );
+                        let out_dir = Some(ctx.config.download_dir());
+                        if let Ok(id) = target.parse::<i64>() {
+                            match ctx.client.get_post(id).await {
+                                Ok(post) => {
+                                    let outcome = engine.download_post(post, out_dir).await;
+                                    println!("{}", outcome.summary());
+                                }
+                                Err(e) => println!("Error: {}", e),
+                            }
+                        } else {
+                            let params = crate::api::search::SearchParams {
+                                tags: target.clone(),
+                                rating: None,
+                                limit: ctx.config.search.default_limit,
+                                page_size: ctx.config.search.page_size,
+                                sort: None,
+                                order: None,
+                                filters: crate::filters::rules::FilterRules::default(),
+                            };
+                            match crate::api::search::search_all(&ctx.client, &ctx.config, &params)
+                                .await
+                            {
+                                Ok(posts) => {
+                                    let outcomes = engine.download_many(posts, out_dir, None).await;
+                                    for outcome in outcomes {
+                                        println!("{}", outcome.summary());
+                                    }
+                                }
+                                Err(e) => println!("Error: {}", e),
+                            }
                         }
                     }
                     ["inspect", id] => {
@@ -88,9 +127,25 @@ pub async fn run(ctx: ReplContext) -> Result<()> {
                         }
                         Err(e) => println!("Error: {}", e),
                     },
-                    ["config"] => {
-                        println!("{:#?}", ctx.config);
+                    ["presets"] => {
+                        let manager = crate::presets::PresetManager::new((*ctx.db).clone());
+                        match manager.list().await {
+                            Ok(presets) if presets.is_empty() => println!("No presets."),
+                            Ok(presets) => {
+                                for preset in presets {
+                                    println!(
+                                        "{}: {} (limit {})",
+                                        preset.name, preset.tags, preset.limit
+                                    );
+                                }
+                            }
+                            Err(e) => println!("Error: {}", e),
+                        }
                     }
+                    ["config"] => match toml::to_string_pretty(&ctx.config) {
+                        Ok(text) => print!("{text}"),
+                        Err(e) => println!("Error: {}", e),
+                    },
                     _ => println!("Unknown command. Type 'help'."),
                 }
             }
