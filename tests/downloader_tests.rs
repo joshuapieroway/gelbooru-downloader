@@ -41,6 +41,94 @@ async fn downloads_file_atomically() {
     assert!(!out.skipped);
     // no .part leftover
     assert!(!out.path.with_extension("part").exists());
+    // A successful post must not stay in the persistent queue.
+    assert!(db.queue_list(-1).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn interrupted_downloads_resume_from_the_queue() {
+    let server = MockServer::start().await;
+    let bytes = png_bytes();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+        .mount(&server)
+        .await;
+    let mut cfg = Config::default();
+    cfg.api.base_url = server.uri();
+    cfg.downloads.validate_files = true;
+    cfg.downloads.resume = false;
+    let dir = tempdir().unwrap();
+    cfg.downloads.directory = dir.path().to_string_lossy().to_string();
+    let db = Arc::new(HistoryDb::open_in_memory().unwrap());
+
+    let post = Post {
+        id: 42,
+        md5: "abc".to_string(),
+        file_url: format!("{}/img.png", server.uri()),
+        file_size: bytes.len() as i64,
+        ..Post::default()
+    };
+    let id = db
+        .enqueue_queue(
+            post,
+            dir.path().to_string_lossy().to_string(),
+            "{id}_{md5}.{ext}".to_string(),
+            String::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    // A killed process leaves the row as `downloading`.
+    db.queue_set_downloading(id).await.unwrap();
+
+    let report = gelbooru_downloader::queue::resume(&db, &cfg).await.unwrap();
+    assert_eq!(report.resumed, 1);
+    assert_eq!(report.completed, 1);
+    assert_eq!(report.failed, 0);
+    assert!(dir.path().join("42_abc.png").exists());
+    assert!(db.queue_list(-1).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_download_remains_in_the_persistent_queue() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not an image".to_vec()))
+        .mount(&server)
+        .await;
+    let mut cfg = Config::default();
+    cfg.api.base_url = server.uri();
+    cfg.downloads.validate_files = true;
+    cfg.downloads.resume = false;
+    let dir = tempdir().unwrap();
+    cfg.downloads.directory = dir.path().to_string_lossy().to_string();
+    let db = Arc::new(HistoryDb::open_in_memory().unwrap());
+    let mut engine = DownloadEngine::new(cfg, Some(db.clone()));
+    engine.filename_template = Some("{id}.{ext}".to_string());
+    engine.folder_template = Some("{rating}".to_string());
+
+    let post = Post {
+        id: 11,
+        rating: "safe".to_string(),
+        file_url: format!("{}/img.png", server.uri()),
+        md5: "abc".to_string(),
+        ..Post::default()
+    };
+    let out = engine.download_post(post, None).await;
+    assert!(out.error.is_some());
+
+    let failed = db.queue_failed().await.unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].post_id, 11);
+    assert_eq!(failed[0].filename_template, "{id}.{ext}");
+    assert_eq!(failed[0].folder_template, "{rating}");
+    assert!(failed[0].error.is_some());
+
+    // Retrying requeues the row instead of dropping it.
+    assert_eq!(db.queue_retry_failed().await.unwrap(), 1);
+    assert!(db.queue_failed().await.unwrap().is_empty());
+    assert_eq!(db.queue_pending().await.unwrap().len(), 1);
 }
 
 #[tokio::test]

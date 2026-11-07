@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-06
+
+Compare: [`v0.2.7...v0.3.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.7...v0.3.0)
+
+Downloads can now be organized with filename and folder templates, and
+unfinished work is kept in a persistent queue that resumes after a restart.
+
+### Added
+
+- `[downloads]` supports `filename_template` and `folder_template`; placeholders
+  include `{id}`, `{md5}`, `{ext}`, `{rating}`, `{artist}`, `{copyright}`,
+  `{character}`, `{title}`, `{source}`, `{year}`, `{tag_count}`, and
+  `{sort_prefix}`.
+- `download` accepts `--filename-template` and `--folder-template`; presets can
+  store both templates and `preset create` accepts `--tags`,
+  `--filename-template`, and `--folder-template`.
+- A SQLite-backed download queue stores pending posts, their destination, and
+  templates before transfer. Failed rows keep their error message.
+- `gelbooru queue list`, `queue resume`, `queue retry`, `queue clear`, and
+  `queue remove` inspect and manage the persistent queue.
+- The TUI resumes queued and interrupted downloads when it starts.
+
+### Changed
+
+- The default `{sort_prefix}{id}_{md5}.{ext}` template keeps existing filenames,
+  including the empty-hash `_file` fallback.
+- Folder template segments are sanitized and `.`/`..` segments are skipped, so
+  a template cannot escape the configured download directory.
+
+### Fixed
+
+- Downloads stopped by a closed TUI or an interrupted CLI run no longer lose
+  their remaining work.
+
 ## [0.2.7] - 2026-11-06
 
 Compare: [`v0.2.6...v0.2.7`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.6...v0.2.7)

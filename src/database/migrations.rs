@@ -22,4 +22,21 @@ CREATE TABLE IF NOT EXISTS presets (
     name TEXT PRIMARY KEY,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS download_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id INTEGER NOT NULL,
+    post_json TEXT NOT NULL,
+    output_dir TEXT NOT NULL,
+    filename_template TEXT NOT NULL DEFAULT '',
+    folder_template TEXT NOT NULL DEFAULT '',
+    sort TEXT,
+    "order" TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(post_id, output_dir)
+);
+CREATE INDEX IF NOT EXISTS idx_download_queue_status ON download_queue(status);
 "#;

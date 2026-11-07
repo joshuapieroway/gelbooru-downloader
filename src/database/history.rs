@@ -1,3 +1,4 @@
+use crate::api::models::Post;
 use crate::database::migrations::SCHEMA;
 use crate::utils::error::{AppError, Result};
 use chrono::Utc;
@@ -18,6 +19,28 @@ pub struct DownloadRecord {
     pub tags: String,
     pub rating: String,
     pub status: String,
+}
+
+/// A persisted download that has not completed yet.
+///
+/// The full post is stored as JSON so a resume does not need the API (or a
+/// still-valid search result) to reconstruct the request. Successful rows are
+/// deleted; failed rows stay behind for inspection and `queue retry`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedDownload {
+    pub id: i64,
+    pub post_id: i64,
+    pub post: Post,
+    pub output_dir: String,
+    pub filename_template: String,
+    pub folder_template: String,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub attempts: i64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Clone)]
@@ -317,6 +340,214 @@ impl HistoryDb {
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
     }
+
+    /// Insert a pending download, or reset an existing row for the same post
+    /// and output directory so a retry is a fresh attempt.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_queue(
+        &self,
+        post: Post,
+        output_dir: String,
+        filename_template: String,
+        folder_template: String,
+        sort: Option<String>,
+        order: Option<String>,
+    ) -> Result<i64> {
+        let conn = self.conn.clone();
+        let post_id = post.id;
+        let post_json = serde_json::to_string(&post)?;
+        let now = now();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO download_queue
+                    (post_id,post_json,output_dir,filename_template,folder_template,sort,\"order\",status,error,attempts,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',NULL,0,?8,?8)
+                 ON CONFLICT(post_id,output_dir) DO UPDATE SET
+                    post_json=excluded.post_json,
+                    filename_template=excluded.filename_template,
+                    folder_template=excluded.folder_template,
+                    sort=excluded.sort,
+                    \"order\"=excluded.\"order\",
+                    status='queued',
+                    error=NULL,
+                    updated_at=excluded.updated_at",
+                params![
+                    post_id,
+                    post_json,
+                    output_dir,
+                    filename_template,
+                    folder_template,
+                    sort,
+                    order,
+                    now
+                ],
+            )
+            .map_err(AppError::from)?;
+            let id: i64 = c
+                .query_row(
+                    "SELECT id FROM download_queue WHERE post_id=?1 AND output_dir=?2",
+                    params![post_id, output_dir],
+                    |r| r.get(0),
+                )
+                .map_err(AppError::from)?;
+            Ok(id)
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+
+    pub async fn queue_set_downloading(&self, id: i64) -> Result<()> {
+        let conn = self.conn.clone();
+        let now = now();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "UPDATE download_queue
+                 SET status='downloading', error=NULL, attempts=attempts+1, updated_at=?1
+                 WHERE id=?2",
+                params![now, id],
+            )
+            .map_err(AppError::from)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+
+    pub async fn queue_set_failed(&self, id: i64, error: &str) -> Result<()> {
+        let conn = self.conn.clone();
+        let error = error.to_string();
+        let now = now();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "UPDATE download_queue SET status='failed', error=?1, updated_at=?2 WHERE id=?3",
+                params![error, now, id],
+            )
+            .map_err(AppError::from)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+
+    pub async fn queue_remove(&self, id: i64) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            c.execute("DELETE FROM download_queue WHERE id=?1", params![id])
+                .map_err(AppError::from)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+
+    /// Rows waiting to run. `downloading` rows are included because they may
+    /// belong to a process that was killed before it could reset the status.
+    pub async fn queue_pending(&self) -> Result<Vec<QueuedDownload>> {
+        self.queue_where("status IN ('queued','downloading')", None)
+            .await
+    }
+
+    pub async fn queue_failed(&self) -> Result<Vec<QueuedDownload>> {
+        self.queue_where("status='failed'", None).await
+    }
+
+    pub async fn queue_list(&self, limit: i64) -> Result<Vec<QueuedDownload>> {
+        self.queue_where("1=1", Some(limit)).await
+    }
+
+    async fn queue_where(
+        &self,
+        predicate: &'static str,
+        limit: Option<i64>,
+    ) -> Result<Vec<QueuedDownload>> {
+        let conn = self.conn.clone();
+        let limit = limit.unwrap_or(-1);
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            let mut stmt = c
+                .prepare(&format!(
+                    "SELECT id,post_id,post_json,output_dir,filename_template,folder_template,
+                            sort,\"order\",status,error,attempts,created_at,updated_at
+                     FROM download_queue
+                     WHERE {predicate}
+                     ORDER BY CASE status WHEN 'downloading' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id
+                     LIMIT ?1"
+                ))
+                .map_err(AppError::from)?;
+            let rows = stmt
+                .query_map(params![limit], queue_row)
+                .map_err(AppError::from)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(AppError::from)?);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+
+    /// Move failed rows back to `queued`. Returns how many were updated.
+    pub async fn queue_retry_failed(&self) -> Result<usize> {
+        let conn = self.conn.clone();
+        let now = now();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            let changed = c
+                .execute(
+                    "UPDATE download_queue SET status='queued', error=NULL, updated_at=?1
+                     WHERE status='failed'",
+                    params![now],
+                )
+                .map_err(AppError::from)?;
+            Ok(changed)
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+
+    /// Delete queue rows. `status: None` clears everything.
+    pub async fn queue_clear(&self, status: Option<&str>) -> Result<usize> {
+        let conn = self.conn.clone();
+        let status = status.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            let changed = match status {
+                Some(status) => c.execute(
+                    "DELETE FROM download_queue WHERE status=?1",
+                    params![status],
+                ),
+                None => c.execute("DELETE FROM download_queue", []),
+            }
+            .map_err(AppError::from)?;
+            Ok(changed)
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+}
+
+fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedDownload> {
+    let post_json: String = row.get(2)?;
+    Ok(QueuedDownload {
+        id: row.get(0)?,
+        post_id: row.get(1)?,
+        post: serde_json::from_str(&post_json).unwrap_or_default(),
+        output_dir: row.get(3)?,
+        filename_template: row.get(4)?,
+        folder_template: row.get(5)?,
+        sort: row.get(6)?,
+        order: row.get(7)?,
+        status: row.get(8)?,
+        error: row.get(9)?,
+        attempts: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
@@ -537,5 +768,89 @@ mod tests {
         assert_eq!(list.len(), 1);
         db.delete_preset("p").await.unwrap();
         assert!(db.get_preset("p").await.unwrap().is_none());
+    }
+
+    fn queued_post(id: i64) -> Post {
+        Post {
+            id,
+            md5: format!("hash{id}"),
+            file_url: format!("http://x/{id}.png"),
+            tags: "tag".to_string(),
+            ..Post::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_round_trip_and_failure_lifecycle() {
+        let db = HistoryDb::open_in_memory().unwrap();
+        let id = db
+            .enqueue_queue(
+                queued_post(7),
+                "/tmp/out".to_string(),
+                "{id}.{ext}".to_string(),
+                "{rating}".to_string(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let pending = db.queue_pending().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].post_id, 7);
+        assert_eq!(pending[0].post.md5, "hash7");
+        assert_eq!(pending[0].output_dir, "/tmp/out");
+        assert_eq!(pending[0].filename_template, "{id}.{ext}");
+
+        db.queue_set_downloading(id).await.unwrap();
+        assert_eq!(db.queue_pending().await.unwrap()[0].attempts, 1);
+        assert_eq!(db.queue_pending().await.unwrap()[0].status, "downloading");
+
+        db.queue_set_failed(id, "boom").await.unwrap();
+        assert!(db.queue_pending().await.unwrap().is_empty());
+        let failed = db.queue_failed().await.unwrap();
+        assert_eq!(failed[0].error.as_deref(), Some("boom"));
+
+        // Enqueuing the same post and directory reuses the row and clears the
+        // error instead of creating a duplicate.
+        let same_id = db
+            .enqueue_queue(
+                queued_post(7),
+                "/tmp/out".to_string(),
+                "{id}.{ext}".to_string(),
+                "{rating}".to_string(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(same_id, id);
+        assert!(db.queue_failed().await.unwrap().is_empty());
+        assert_eq!(db.queue_pending().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn queue_retry_and_clear() {
+        let db = HistoryDb::open_in_memory().unwrap();
+        for id in [1, 2] {
+            let row = db
+                .enqueue_queue(
+                    queued_post(id),
+                    "/tmp/out".to_string(),
+                    String::new(),
+                    String::new(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            db.queue_set_failed(row, "nope").await.unwrap();
+        }
+        assert_eq!(db.queue_retry_failed().await.unwrap(), 2);
+        assert_eq!(db.queue_pending().await.unwrap().len(), 2);
+        assert_eq!(db.queue_list(10).await.unwrap().len(), 2);
+        assert_eq!(db.queue_clear(Some("failed")).await.unwrap(), 0);
+        assert_eq!(db.queue_clear(None).await.unwrap(), 2);
+        assert!(db.queue_list(10).await.unwrap().is_empty());
     }
 }

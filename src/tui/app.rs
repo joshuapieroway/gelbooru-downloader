@@ -424,6 +424,26 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
         None
     };
     let client = GelbooruClient::new(&cfg).ok();
+    // Pick up downloads interrupted by a previous run without delaying the
+    // first frame; progress shows up in the Queue tab like any other job.
+    if let Some(db) = db.clone() {
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            match crate::queue::resume(&db, &cfg).await {
+                Ok(report) if report.resumed > 0 => {
+                    tracing::info!(
+                        "resumed {} queued download(s): completed={} skipped={} failed={}",
+                        report.resumed,
+                        report.completed,
+                        report.skipped,
+                        report.failed
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("could not resume download queue: {e}"),
+            }
+        });
+    }
     let state = Arc::new(Mutex::new(AppState::new(db, client)));
 
     enable_raw_mode()?;

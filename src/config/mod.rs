@@ -47,6 +47,10 @@ pub struct DownloadsConfig {
     pub skip_duplicates: bool,
     #[serde(default)]
     pub bandwidth_limit: Option<u64>,
+    #[serde(default = "default_filename_template")]
+    pub filename_template: String,
+    #[serde(default)]
+    pub folder_template: String,
 }
 
 fn default_dir() -> String {
@@ -57,6 +61,9 @@ fn default_concurrency() -> usize {
 }
 fn default_retries() -> u32 {
     5
+}
+fn default_filename_template() -> String {
+    crate::downloader::naming::DEFAULT_FILENAME_TEMPLATE.to_string()
 }
 fn default_true() -> bool {
     true
@@ -72,6 +79,8 @@ impl Default for DownloadsConfig {
             validate_files: true,
             skip_duplicates: true,
             bandwidth_limit: None,
+            filename_template: default_filename_template(),
+            folder_template: String::new(),
         }
     }
 }
@@ -229,6 +238,11 @@ mod tests {
         assert_eq!(cfg.search.page_size, 100);
         assert_eq!(cfg.search.default_limit, 100);
         assert_eq!(cfg.downloads.concurrency, 16);
+        assert_eq!(
+            cfg.downloads.filename_template,
+            crate::downloader::naming::DEFAULT_FILENAME_TEMPLATE
+        );
+        assert!(cfg.downloads.folder_template.is_empty());
         assert!(cfg.database.enabled);
     }
 

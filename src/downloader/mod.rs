@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod naming;
 pub mod progress;
 pub mod resume;
 pub mod validation;

@@ -96,6 +96,12 @@ pub enum Commands {
         order: Option<String>,
         #[arg(long)]
         force: bool,
+        /// Override the configured filename template for this download.
+        #[arg(long)]
+        filename_template: Option<String>,
+        /// Override the configured folder template for this download.
+        #[arg(long)]
+        folder_template: Option<String>,
     },
     Batch {
         file: String,
@@ -132,15 +138,55 @@ pub enum Commands {
         #[arg(long)]
         init: bool,
     },
+    /// Inspect and resume downloads left in the persistent queue.
+    Queue {
+        #[command(subcommand)]
+        cmd: QueueCmd,
+    },
     Tui,
 }
 
 #[derive(Subcommand, Debug)]
+pub enum QueueCmd {
+    List {
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Resume rows left queued or downloading by an interrupted run.
+    Resume,
+    /// Requeue failed rows and resume them.
+    Retry,
+    Clear {
+        /// Only clear failed rows.
+        #[arg(long)]
+        failed: bool,
+    },
+    Remove {
+        id: i64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum PresetCmd {
-    Create { name: String },
+    Create {
+        name: String,
+        /// Tags for the preset. Prompted interactively when omitted.
+        #[arg(long)]
+        tags: Option<String>,
+        /// Override the configured filename template when this preset runs.
+        #[arg(long)]
+        filename_template: Option<String>,
+        /// Override the configured folder template when this preset runs.
+        #[arg(long)]
+        folder_template: Option<String>,
+    },
     List,
-    Run { name: String },
-    Delete { name: String },
+    Run {
+        name: String,
+    },
+    Delete {
+        name: String,
+    },
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -244,6 +290,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             sort,
             order,
             force,
+            filename_template,
+            folder_template,
         } => {
             let out_dir = output
                 .map(|p| paths::expand_tilde(&p.to_string_lossy()))
@@ -256,6 +304,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             engine.order = order.clone();
             engine.label = Some(target.clone());
             engine.rating = rating.clone();
+            engine.filename_template = filename_template;
+            engine.folder_template = folder_template;
             // determine if target is id
             if let Ok(id) = target.parse::<i64>() {
                 let post = client.get_post(id).await?;
@@ -413,17 +463,29 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 .unwrap_or_else(|| Arc::new(HistoryDb::open_in_memory().unwrap()));
             let pm = PresetManager::new((*db).clone());
             match cmd {
-                PresetCmd::Create { name } => {
-                    // interactive minimal: create empty preset with name and tags prompt
-                    use std::io::{self, BufRead};
-                    print!("Tags: ");
-                    io::stdout().flush()?;
-                    let mut tags = String::new();
-                    io::stdin().lock().read_line(&mut tags)?;
+                PresetCmd::Create {
+                    name,
+                    tags,
+                    filename_template,
+                    folder_template,
+                } => {
+                    let tags = match tags {
+                        Some(tags) => tags,
+                        None => {
+                            use std::io::{self, BufRead};
+                            print!("Tags: ");
+                            io::stdout().flush()?;
+                            let mut tags = String::new();
+                            io::stdin().lock().read_line(&mut tags)?;
+                            tags.trim().to_string()
+                        }
+                    };
                     let preset = Preset {
                         name: name.clone(),
-                        tags: tags.trim().to_string(),
+                        tags,
                         limit: cfg.search.default_limit,
+                        filename_template,
+                        folder_template,
                         ..Default::default()
                     };
                     pm.create(preset).await?;
@@ -441,7 +503,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 PresetCmd::Run { name } => {
                     if let Some(preset) = pm.get(&name).await? {
-                        let engine = DownloadEngine::new(cfg.clone(), Some(db.clone()));
+                        let mut engine = DownloadEngine::new(cfg.clone(), Some(db.clone()));
+                        engine.filename_template = preset.filename_template.clone();
+                        engine.folder_template = preset.folder_template.clone();
                         let filters = preset.to_filter_rules();
                         let params = search::SearchParams {
                             tags: preset.tags.clone(),
@@ -538,6 +602,76 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             if show || !init {
                 println!("{}", toml::to_string_pretty(&cfg)?);
+            }
+        }
+        Commands::Queue { cmd } => {
+            let db = db.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("database is disabled; enable [database] in the config")
+            })?;
+            match cmd {
+                QueueCmd::List { limit } => {
+                    let rows = db.queue_list(limit).await?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&rows)?);
+                    } else if rows.is_empty() {
+                        println!("Download queue is empty.");
+                    } else {
+                        for row in rows {
+                            let error = row
+                                .error
+                                .as_deref()
+                                .map(|e| format!(" | {e}"))
+                                .unwrap_or_default();
+                            println!(
+                                "{} | {} | post {} | {}x{} | {} | attempts {}{}",
+                                row.id,
+                                row.status,
+                                row.post_id,
+                                row.post.width,
+                                row.post.height,
+                                row.output_dir,
+                                row.attempts,
+                                error
+                            );
+                        }
+                        println!("Total queue records: {}", db.queue_list(-1).await?.len());
+                    }
+                }
+                QueueCmd::Resume => {
+                    let report = crate::queue::resume(db, &cfg).await?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else if report.resumed == 0 {
+                        println!("Download queue is empty.");
+                    } else {
+                        println!(
+                            "Resumed {} download(s): completed={} skipped={} failed={}",
+                            report.resumed, report.completed, report.skipped, report.failed
+                        );
+                    }
+                }
+                QueueCmd::Retry => {
+                    let report = crate::queue::retry_failed(db, &cfg).await?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else if report.resumed == 0 {
+                        println!("No failed downloads to retry.");
+                    } else {
+                        println!(
+                            "Retried {} download(s): completed={} skipped={} failed={}",
+                            report.resumed, report.completed, report.skipped, report.failed
+                        );
+                    }
+                }
+                QueueCmd::Clear { failed } => {
+                    let status = failed.then_some("failed");
+                    let removed = db.queue_clear(status).await?;
+                    println!("Removed {removed} queue record(s).");
+                }
+                QueueCmd::Remove { id } => {
+                    db.queue_remove(id).await?;
+                    println!("Removed queue record {id}.");
+                }
             }
         }
         Commands::Tui => {

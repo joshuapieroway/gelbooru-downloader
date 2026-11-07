@@ -1,9 +1,9 @@
 use crate::api::models::Post;
 use crate::config::Config;
 use crate::database::history::{DownloadRecord, HistoryDb};
+use crate::downloader::naming;
 use crate::downloader::validation;
 use crate::utils::error::{AppError, Result};
-use crate::utils::paths::sanitize_filename;
 use blake3::Hasher;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -197,6 +197,9 @@ pub struct DownloadEngine {
     pub order: Option<String>,
     pub label: Option<String>,
     pub rating: Option<String>,
+    /// Per-download overrides; `None` uses `downloads.*_template` from config.
+    pub filename_template: Option<String>,
+    pub folder_template: Option<String>,
     pub progress: Arc<ProgressTracker>,
     pub queue: Option<Arc<DownloadQueue>>,
     /// Optional CLI progress bar advanced while response bytes stream in.
@@ -210,6 +213,15 @@ pub struct Stats {
     pub failed: usize,
     pub skipped: usize,
     pub bytes: u64,
+}
+
+/// Temporary path beside the final file, keeping its full extension:
+/// `image.jpg` becomes `image.jpg.part`.
+fn part_path_for(final_path: &Path) -> PathBuf {
+    match final_path.file_name().and_then(|name| name.to_str()) {
+        Some(name) => final_path.with_file_name(format!("{name}.part")),
+        None => final_path.with_extension("part"),
+    }
 }
 
 impl DownloadEngine {
@@ -249,6 +261,8 @@ impl DownloadEngine {
             order: None,
             label: None,
             rating: None,
+            filename_template: None,
+            folder_template: None,
             progress: Arc::new(ProgressTracker::new()),
             queue,
             progress_bar: None,
@@ -260,6 +274,82 @@ impl DownloadEngine {
     }
 
     pub async fn download_post(&self, post: Post, output_dir: Option<PathBuf>) -> DownloadOutcome {
+        let tracked = self.queue_start(&post, output_dir.as_deref()).await;
+        let outcome = self.download_post_inner(post, output_dir).await;
+        if let Some((db, id)) = tracked {
+            let result = match &outcome.error {
+                None => db.queue_remove(id).await,
+                Some(error) => db.queue_set_failed(id, error).await,
+            };
+            if let Err(e) = result {
+                tracing::warn!("could not update download queue row {id}: {e}");
+            }
+        }
+        outcome
+    }
+
+    /// Settings used to persist a queue row, resolved the same way the
+    /// download itself resolves its destination and templates.
+    fn queue_output_dir(&self, output_dir: Option<&Path>) -> PathBuf {
+        output_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.config.download_dir())
+    }
+
+    fn queue_filename_template(&self) -> String {
+        self.filename_template
+            .clone()
+            .unwrap_or_else(|| self.config.downloads.filename_template.clone())
+    }
+
+    fn queue_folder_template(&self) -> String {
+        self.folder_template
+            .clone()
+            .unwrap_or_else(|| self.config.downloads.folder_template.clone())
+    }
+
+    async fn queue_enqueue(&self, post: &Post, output_dir: Option<&Path>) -> Option<i64> {
+        let db = self.db.as_ref()?;
+        match db
+            .enqueue_queue(
+                post.clone(),
+                self.queue_output_dir(output_dir)
+                    .to_string_lossy()
+                    .to_string(),
+                self.queue_filename_template(),
+                self.queue_folder_template(),
+                self.sort.clone(),
+                self.order.clone(),
+            )
+            .await
+        {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!("could not persist post #{} in the queue: {e}", post.id);
+                None
+            }
+        }
+    }
+
+    /// Persist the post and mark its row as actively downloading.
+    async fn queue_start(
+        &self,
+        post: &Post,
+        output_dir: Option<&Path>,
+    ) -> Option<(Arc<HistoryDb>, i64)> {
+        let db = self.db.as_ref()?.clone();
+        let id = self.queue_enqueue(post, output_dir).await?;
+        if let Err(e) = db.queue_set_downloading(id).await {
+            tracing::warn!("could not mark queue row {id} downloading: {e}");
+        }
+        Some((db, id))
+    }
+
+    async fn download_post_inner(
+        &self,
+        post: Post,
+        output_dir: Option<PathBuf>,
+    ) -> DownloadOutcome {
         let post_id = post.id;
 
         let _permit = match self.semaphore.acquire().await {
@@ -314,12 +404,6 @@ impl DownloadEngine {
                 error: Some(e.to_string()),
             };
         }
-        // filename
-        let ext = if post.extension().is_empty() {
-            "jpg".to_string()
-        } else {
-            post.extension()
-        };
         let sort_prefix = match &self.sort {
             Some(key) if key.eq_ignore_ascii_case("score") => {
                 let desc = self
@@ -347,14 +431,21 @@ impl DownloadEngine {
             }
             _ => String::new(),
         };
-        let filename = format!(
-            "{}{}_{}.{}",
-            sort_prefix,
-            post.id,
-            sanitize_filename(&post.md5),
-            ext
+        let filename_template = self
+            .filename_template
+            .as_deref()
+            .unwrap_or(&self.config.downloads.filename_template);
+        let folder_template = self
+            .folder_template
+            .as_deref()
+            .unwrap_or(&self.config.downloads.folder_template);
+        let final_path = naming::output_path(
+            &dir,
+            &post,
+            filename_template,
+            folder_template,
+            &sort_prefix,
         );
-        let final_path = dir.join(&filename);
 
         // duplicate check by post_id (only skip if the file still exists on disk)
         if self.config.downloads.skip_duplicates {
@@ -419,7 +510,7 @@ impl DownloadEngine {
         // Large files (> 15 MB) may timeout or expire on download
         let large_file = post.file_size > 15_000_000;
 
-        let part_path = dir.join(format!("{}.part", filename));
+        let part_path = part_path_for(&final_path);
         let expected_size = post.file_size.max(0) as u64;
         let mut result = self
             .download_file(&url, &final_path, &part_path, post_id, expected_size)
@@ -832,6 +923,13 @@ impl DownloadEngine {
             .into_iter()
             .filter(|p| p.id == 0 || seen.insert(p.id))
             .collect();
+        // Persist the whole batch before any worker starts. If the process is
+        // killed mid-run, posts that never reached a worker can still resume.
+        if self.db.is_some() {
+            for post in &posts {
+                self.queue_enqueue(post, output_dir.as_deref()).await;
+            }
+        }
         let total_files = posts.len();
         // The API reports each post's size, so the bar can track real bytes
         // instead of only completed files. If no sizes are known at all we

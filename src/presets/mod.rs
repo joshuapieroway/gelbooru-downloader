@@ -31,6 +31,10 @@ pub struct Preset {
     pub extensions: Vec<String>,
     #[serde(default)]
     pub output_dir: Option<String>,
+    #[serde(default)]
+    pub filename_template: Option<String>,
+    #[serde(default)]
+    pub folder_template: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: u32,
 }
