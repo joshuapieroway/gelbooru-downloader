@@ -1559,7 +1559,8 @@ fn friendly_path(path: &Path) -> String {
 }
 
 /// Remove a transient queue message once its download has finished, so the
-/// footer does not keep saying "Queued download..." next to the saved result.
+/// footer does not keep saying "Queued download..." next to the completion
+/// result.
 fn clear_download_status(status: &mut String, post_id: i64) {
     let queued = format!("Queued download for post #{}...", post_id);
     let active = format!("Post #{} is already downloading", post_id);
@@ -1576,7 +1577,10 @@ fn quick_download_status(outcome: &DownloadOutcome) -> String {
         return format!("Download failed: {err}");
     }
     if outcome.skipped {
-        return format!("Already downloaded: {}", friendly_path(&outcome.path));
+        return format!(
+            "Download complete (already present): {}",
+            friendly_path(&outcome.path)
+        );
     }
     let name = outcome
         .path
@@ -1585,7 +1589,7 @@ fn quick_download_status(outcome: &DownloadOutcome) -> String {
         .unwrap_or("file");
     let dir = outcome.path.parent().unwrap_or(&outcome.path);
     format!(
-        "Saved {} ({}) to {}",
+        "Download complete: {} ({}) in {}",
         name,
         human_bytes(outcome.size),
         friendly_path(dir)
@@ -2248,14 +2252,15 @@ mod tests {
             error: None,
         };
         let saved = quick_download_status(&outcome);
-        assert!(saved.contains("Saved"), "{saved}");
+        assert!(saved.starts_with("Download complete:"), "{saved}");
         assert!(saved.contains("2.0 KB"), "{saved}");
+        assert!(!saved.to_ascii_lowercase().contains("queued"), "{saved}");
 
         let skipped = DownloadOutcome {
             skipped: true,
             ..outcome.clone()
         };
-        assert!(quick_download_status(&skipped).starts_with("Already downloaded"));
+        assert!(quick_download_status(&skipped).starts_with("Download complete (already present)"));
 
         let failed = DownloadOutcome {
             error: Some("cancelled".to_string()),

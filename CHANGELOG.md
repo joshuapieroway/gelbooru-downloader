@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-11-06
+
+Compare: [`v0.2.6...v0.2.7`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.6...v0.2.7)
+
+Quick downloads now report completion instead of leaving the queued message in
+the viewer footer.
+
+### Changed
+
+- When a quick download finishes, the TUI viewer shows
+  `Download complete: <file> (<size>) in <dir>`; a skipped duplicate shows
+  `Download complete (already present): <path>`.
+
 ## [0.2.6] - 2026-11-06
 
 Compare: [`v0.2.5...v0.2.6`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.5...v0.2.6)
