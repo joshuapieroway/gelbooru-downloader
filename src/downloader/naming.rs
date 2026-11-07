@@ -28,6 +28,7 @@ impl NamingContext<'_> {
             "ext" => effective_extension(post),
             "rating" => post.rating.clone(),
             "score" => post.score.to_string(),
+            "score_desc" => descending_score(post.score),
             "width" => post.width.to_string(),
             "height" => post.height.to_string(),
             "artist" => first_tag_value(&post.tags, "artist:"),
@@ -117,6 +118,15 @@ fn render(template: &str, ctx: &NamingContext<'_>) -> String {
     }
 
     out
+}
+
+/// Zero-padded, inverted score so ascending filename order lists the highest
+/// score first. The result always has 10 digits; scores beyond the offset are
+/// clamped so the width cannot change.
+fn descending_score(score: i64) -> String {
+    const OFFSET: i64 = 1_000_000_000;
+    let inverted = OFFSET.saturating_sub(score.clamp(-OFFSET, OFFSET));
+    format!("{inverted:010}")
 }
 
 fn first_tag_value(tags: &str, prefix: &str) -> String {
@@ -246,5 +256,35 @@ mod tests {
             sort_prefix: "",
         };
         assert_eq!(render("{{{id}}}.{ext}", &ctx), "{42}.jpg");
+    }
+
+    #[test]
+    fn score_desc_lists_the_highest_score_first() {
+        let mut names = [
+            descending_score(2),
+            descending_score(100),
+            descending_score(0),
+            descending_score(-5),
+        ];
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                descending_score(100),
+                descending_score(2),
+                descending_score(0),
+                descending_score(-5),
+            ]
+        );
+        assert!(names.iter().all(|name| name.len() == 10));
+    }
+
+    #[test]
+    fn score_desc_is_usable_in_a_template() {
+        let post = post();
+        assert_eq!(
+            output_path(Path::new("/tmp"), &post, "{score_desc}_{id}.{ext}", "", ""),
+            PathBuf::from("/tmp/0999999988_42.jpg")
+        );
     }
 }

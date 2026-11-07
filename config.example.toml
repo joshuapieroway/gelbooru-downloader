@@ -14,9 +14,11 @@ skip_duplicates = true
 # bandwidth_limit = 1048576
 
 # Filename and folder layout. Placeholders: {id}, {md5}, {ext}, {rating},
-# {score}, {width}, {height}, {artist}, {copyright}, {character}, {meta},
-# {title}, {source}, {tag_count}, {year}, {sort_prefix}. Unknown placeholders
-# render empty and `{{` / `}}` produce literal braces.
+# {score}, {score_desc}, {width}, {height}, {artist}, {copyright},
+# {character}, {meta}, {title}, {source}, {tag_count}, {year}, {sort_prefix}.
+# `{score_desc}` is a fixed-width inverted score so ascending filename order
+# shows the highest score first. Unknown placeholders render empty and
+# `{{` / `}}` produce literal braces.
 # Folder segments are separated by `/` and sanitized like filenames.
 filename_template = "{sort_prefix}{id}_{md5}.{ext}"
 folder_template = ""

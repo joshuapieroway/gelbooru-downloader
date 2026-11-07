@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-06
+
+Compare: [`v0.3.0...v0.3.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.3.0...v0.3.1)
+
+Adds a filename placeholder that sorts posts by descending score.
+
+### Added
+
+- `{score_desc}` renders a fixed-width inverted score, so ascending filename
+  order lists the highest score first. Combine it with `{score}` when the real
+  score should stay visible, for example `{score_desc}_{score}_{id}.{ext}`.
+
 ## [0.3.0] - 2026-11-06
 
 Compare: [`v0.2.7...v0.3.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.2.7...v0.3.0)

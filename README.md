@@ -67,9 +67,16 @@ gelbooru preset create landscapes --tags "landscape" \
 ```
 
 Available placeholders: `{id}`, `{md5}`, `{ext}`, `{rating}`, `{score}`,
-`{width}`, `{height}`, `{artist}`, `{copyright}`, `{character}`, `{meta}`,
-`{title}`, `{source}`, `{tag_count}`, `{year}`, and `{sort_prefix}`. Unknown
-placeholders render as an empty string, and `{{` / `}}` produce literal braces.
+`{score_desc}`, `{width}`, `{height}`, `{artist}`, `{copyright}`,
+`{character}`, `{meta}`, `{title}`, `{source}`, `{tag_count}`, `{year}`, and
+`{sort_prefix}`. Unknown placeholders render as an empty string, and `{{` /
+`}}` produce literal braces.
+
+`{score}` is the literal score, so a normal alphabetical filename sort puts
+`10` before `9`. Use `{score_desc}` for a fixed-width inverted score instead:
+ascending filename order then lists the highest score first. For example,
+`{score_desc}_{score}_{id}.{ext}` keeps the real score visible while sorting
+correctly.
 
 Folder segments are separated by `/`; empty, `.`, and `..` segments are
 skipped and every segment is sanitized, so a template can never escape the
