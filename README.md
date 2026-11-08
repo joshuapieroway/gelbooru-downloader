@@ -107,9 +107,3 @@ gelbooru queue remove <id>     # drop one row
 TOML config with env/CLI overrides. See `config.example.toml`. XDG directories used by default.
 
 Environment variables: `GELBOORU_BASE_URL`, `GELBOORU_USER_ID`, `GELBOORU_API_KEY`, `GELBOORU_DOWNLOAD_DIR`, `GELBOORU_CONCURRENCY`.
-
-## Tests
-
-```bash
-cargo test
-```
