@@ -98,6 +98,10 @@ pub enum Commands {
         /// Override the configured folder template for this download.
         #[arg(long)]
         folder_template: Option<String>,
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long, default_value = "desc")]
+        order: Option<String>,
     },
     Batch {
         file: String,
@@ -286,6 +290,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             force,
             filename_template,
             folder_template,
+            sort,
+            order,
         } => {
             let out_dir = output
                 .map(|p| paths::expand_tilde(&p.to_string_lossy()))
@@ -329,8 +335,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                     rating: rating.clone(),
                     limit: limit.unwrap_or(cfg.search.default_limit),
                     page_size: cfg.search.page_size,
-                    sort: None,
-                    order: None,
+                    sort: sort.clone(),
+                    order: order.clone(),
                     filters: rules,
                 };
                 let posts = search::search_all(&client, &cfg, &params).await?;

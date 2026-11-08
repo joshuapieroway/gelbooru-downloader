@@ -4,11 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-08
+
+Compare: [`v0.4.1...v0.4.2`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.4.1...v0.4.2)
+
+Restores `--sort` and `--order` flags to the `download` command, allowing users to
+control API-side ordering when downloading multiple posts by tags.
+
+### Added
+
+- `download --sort` and `download --order` flags restore control over post ordering.
+  Use `--sort score --order desc` to download higher-rated posts first, or other
+  values like `id`, `width`, `height`, `created`, `rating` (default sort is `score`
+  descending).
+
 ## [0.4.1] - 2026-11-07
 
 Compare: [`v0.4.0...v0.4.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.4.0...v0.4.1)
 
-Keeps download progress clean and prevents duplicate sample downloads when a
+Kept download progress clean and prevented duplicate sample downloads when a
 filename template changes.
 
 ### Changed
