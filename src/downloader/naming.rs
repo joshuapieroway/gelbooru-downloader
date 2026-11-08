@@ -27,8 +27,12 @@ impl NamingContext<'_> {
             "md5" => sanitize_filename(&post.md5),
             "ext" => effective_extension(post),
             "rating" => post.rating.clone(),
-            "score" => post.score.to_string(),
+            // Filename templates sort ascending, so the default score form is
+            // the inverted, fixed-width value that puts the highest score
+            // first. `{score_raw}` keeps the literal number.
+            "score" => descending_score(post.score),
             "score_desc" => descending_score(post.score),
+            "score_raw" => post.score.to_string(),
             "width" => post.width.to_string(),
             "height" => post.height.to_string(),
             "artist" => first_tag_value(&post.tags, "artist:"),
@@ -280,11 +284,21 @@ mod tests {
     }
 
     #[test]
-    fn score_desc_is_usable_in_a_template() {
+    fn score_is_descending_by_default_in_a_template() {
         let post = post();
         assert_eq!(
-            output_path(Path::new("/tmp"), &post, "{score_desc}_{id}.{ext}", "", ""),
+            output_path(Path::new("/tmp"), &post, "{score}_{id}.{ext}", "", ""),
             PathBuf::from("/tmp/0999999988_42.jpg")
+        );
+        assert_eq!(
+            output_path(
+                Path::new("/tmp"),
+                &post,
+                "{score_desc}_{score_raw}_{id}.{ext}",
+                "",
+                ""
+            ),
+            PathBuf::from("/tmp/0999999988_12_42.jpg")
         );
     }
 }

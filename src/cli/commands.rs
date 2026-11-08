@@ -91,10 +91,6 @@ pub enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
         #[arg(long)]
-        sort: Option<String>,
-        #[arg(long, default_value = "desc")]
-        order: Option<String>,
-        #[arg(long)]
         force: bool,
         /// Override the configured filename template for this download.
         #[arg(long)]
@@ -287,8 +283,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             rating,
             limit,
             output,
-            sort,
-            order,
             force,
             filename_template,
             folder_template,
@@ -300,8 +294,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 cfg.downloads.skip_duplicates = false;
             }
             let mut engine = DownloadEngine::new(cfg.clone(), db.clone());
-            engine.sort = sort.clone();
-            engine.order = order.clone();
             engine.label = Some(target.clone());
             engine.rating = rating.clone();
             engine.filename_template = filename_template;
@@ -337,8 +329,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                     rating: rating.clone(),
                     limit: limit.unwrap_or(cfg.search.default_limit),
                     page_size: cfg.search.page_size,
-                    sort: sort.clone(),
-                    order: order.clone(),
+                    sort: None,
+                    order: None,
                     filters: rules,
                 };
                 let posts = search::search_all(&client, &cfg, &params).await?;

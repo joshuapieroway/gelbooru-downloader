@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-06
+
+Compare: [`v0.3.1...v0.4.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.3.1...v0.4.0)
+
+Filename templates now sort by descending score without any extra flags.
+
+### Added
+
+- `{score_raw}` renders the literal post score.
+
+### Changed
+
+- `{score}` renders a fixed-width inverted score, so ascending filename order
+  lists the highest score first. `{score_desc}` remains as an alias.
+- Filename templates such as `{score}_{id}` now put the highest-scored posts at
+  the top without `--sort` or `--order`.
+
+### Removed
+
+- `download --sort` and `download --order`; use the filename template to
+  control ordering. `search --sort` and `search --order` are unchanged.
+
 ## [0.3.1] - 2026-11-06
 
 Compare: [`v0.3.0...v0.3.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.3.0...v0.3.1)
