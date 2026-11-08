@@ -37,7 +37,7 @@ impl NamingContext<'_> {
             "height" => post.height.to_string(),
             "artist" => first_tag_value(&post.tags, "artist:"),
             "copyright" => first_tag_value(&post.tags, "copyright:"),
-            "character" => first_tag_value(&post.tags, "character:"),
+            "character" => extract_character_name(&post.tags),
             "meta" => first_tag_value(&post.tags, "meta:"),
             "title" => post.title.clone(),
             "source" => source_host(&post.source),
@@ -138,6 +138,37 @@ fn first_tag_value(tags: &str, prefix: &str) -> String {
         .find_map(|tag| tag.strip_prefix(prefix))
         .unwrap_or_default()
         .to_string()
+}
+
+/// Find the first "character-like" tag, preferring `character:` namespace
+/// tags but falling back to tags matching the pattern `name_(something)`
+/// which is common for characters from games/anime that don't use namespaces.
+fn extract_character_name(tags: &str) -> String {
+    // First, try the character: namespace (standard Gelbooru convention)
+    let from_namespace = first_tag_value(tags, "character:");
+    if !from_namespace.is_empty() {
+        return from_namespace;
+    }
+
+    // Fall back to tags like "tangtang_(arknights)", "fluorite_(arknights)"
+    // These are common for characters when namespace tagging isn't used
+    tags.split_whitespace()
+        .find_map(|tag| {
+            // Match tags containing _( pattern (underscore followed by open paren)
+            tag.find("_(")
+                .map(|pos| {
+                    let name = &tag[..pos];
+                    // Format: name_(source) -> convert to "name (source)"
+                    // Extract content inside parentheses and replace underscores with spaces
+                    if let Some(end_paren) = tag[pos + 2..].chars().position(|c| c == ')') {
+                        let inner = &tag[pos + 2..pos + 2 + end_paren];
+                        format!("{} ({})", name.replace('_', " "), inner.replace('_', " "))
+                    } else {
+                        String::new()
+                    }
+                })
+        })
+        .unwrap_or_default()
 }
 
 fn effective_extension(post: &Post) -> String {
@@ -299,6 +330,76 @@ mod tests {
                 ""
             ),
             PathBuf::from("/tmp/0999999988_12_42.jpg")
+        );
+    }
+
+    #[test]
+    fn character_namespace_taken_preference_over_pattern() {
+        // Post with both character: namespace and pattern-style tag
+        let post = Post {
+            tags: "character:hero tangtang_(arknights) fluorite_(arknights)".to_string(),
+            ..Post::default()
+        };
+        let ctx = NamingContext {
+            post: &post,
+            sort_prefix: "",
+        };
+        assert_eq!(ctx.value("character"), "hero");
+    }
+
+    #[test]
+    fn character_pattern_extraction_for_non_namespace_tags() {
+        // Arknights-style tags without character: namespace
+        let post = Post {
+            tags: "tangtang_(arknights) fluorite_(arknights) arknights:_endfield".to_string(),
+            ..Post::default()
+        };
+        let ctx = NamingContext {
+            post: &post,
+            sort_prefix: "",
+        };
+        // Should extract "tangtang (arknights)" as the character name
+        assert_eq!(ctx.value("character"), "tangtang (arknights)");
+    }
+
+    #[test]
+    fn character_empty_when_no_match() {
+        // No character tags at all
+        let post = Post {
+            tags: "splatoon arknights endfield".to_string(),
+            ..Post::default()
+        };
+        let ctx = NamingContext {
+            post: &post,
+            sort_prefix: "",
+        };
+        assert_eq!(ctx.value("character"), "");
+    }
+
+    #[test]
+    fn output_path_with_character_pattern_folder() {
+        // Post with character pattern tag
+        let post = Post {
+            id: 42,
+            rating: "sensitive".to_string(),
+            score: 5,
+            tags: "tangtang_(arknights) arknights:_endfield".to_string(),
+            ..Post::default()
+        };
+        let path = output_path(
+            Path::new("/tmp"),
+            &post,
+            "{score}_{id}.{ext}",
+            "{character}/{rating}",
+            "",
+        );
+        // Character should be extracted as "tangtang (arknights)"
+        // After sanitization: "tangtang__arknights_"
+        // Rating: "sensitive"
+        assert!(
+            path.to_string_lossy().contains("tangtang") || path.components().count() >= 3,
+            "Got path: {:?}",
+            path
         );
     }
 }

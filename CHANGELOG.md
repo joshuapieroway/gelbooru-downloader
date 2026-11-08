@@ -8,11 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 Compare: [`v0.4.2...v0.5.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.4.2...v0.5.0)
 
-Brings `batch`, `watch`, and presets into parity with `download`/`search` for
-ordering and rating control, and fails fast on invalid sort/order values.
+Brings sort/order validation and parity across download, batch, watch, and
+presets. The download command now properly wires sort/order to the filename
+template.
 
 ### Added
 
+- `download --sort`, `download --order` now properly apply to filename templates.
+  Use `--sort score --order desc` to download higher-scored posts first.
 - `batch --sort`, `batch --order`, `batch --rating` apply the same ordering to
   every tag in the file; `watch --sort`, `watch --order`, `watch --rating`,
   `watch --limit` control each poll.
@@ -25,6 +28,8 @@ ordering and rating control, and fails fast on invalid sort/order values.
 
 ### Changed
 
+- `download` command now wires `sort` and `order` parameters to the download
+  engine for proper filename prefix generation.
 - Legacy presets without `sort`/`order` deserialize as `None` and behave as
   before.
 

@@ -329,6 +329,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let mut engine = DownloadEngine::new(cfg.clone(), db.clone());
             engine.label = Some(target.clone());
             engine.rating = rating.clone();
+            engine.sort = sort.clone();
+            engine.order = order.clone();
             engine.filename_template = filename_template;
             engine.folder_template = folder_template;
             // determine if target is id
@@ -357,6 +359,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 if let Some(r) = &rating {
                     rules.ratings = crate::filters::rules::parse_ratings(r);
                 }
+                search::validate_sort_order(&sort, &order)?;
                 let params = search::SearchParams {
                     tags: target.clone(),
                     rating: rating.clone(),
