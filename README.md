@@ -1,6 +1,6 @@
-# Gelbooru Downloader (Rust)
+# Gelbooru Downloader
 
-High-performance asynchronous Gelbooru API client and image downloader.
+High-performance asynchronous Gelbooru API client and image downloader built entirely in rust.
 
 ## Build
 
