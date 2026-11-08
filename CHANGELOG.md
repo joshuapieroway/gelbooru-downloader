@@ -10,7 +10,8 @@ Compare: [`v0.4.2...v0.5.0`](https://github.com/joshuapieroway/gelbooru-download
 
 Brings sort/order validation and parity across download, batch, watch, and
 presets. The download command now properly wires sort/order to the filename
-template.
+template. Enhanced `{character}` folder template now extracts character names
+from tags like `tangtang_(arknights)` when `character:` namespace is not used.
 
 ### Added
 
@@ -25,11 +26,15 @@ template.
   a message listing allowed values (`score`, `id`, `width`, `height`, `created`,
   `date`, `created_at`, `rating` and `asc`/`desc`) instead of silently
   sorting by `id`.
+- `{character}` folder template now extracts character names from non-namespaced
+  tags matching the pattern `name_(series)`, e.g., `tangtang_(arknights)` → `tangtang (arknights)`.
 
 ### Changed
 
 - `download` command now wires `sort` and `order` parameters to the download
   engine for proper filename prefix generation.
+- `{character}` placeholder prefers `character:` namespace tags over pattern-style
+  tags, and falls back to extracting from `name_(series)` patterns.
 - Legacy presets without `sort`/`order` deserialize as `None` and behave as
   before.
 
