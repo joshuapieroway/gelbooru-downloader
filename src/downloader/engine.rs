@@ -447,23 +447,28 @@ impl DownloadEngine {
             &sort_prefix,
         );
 
-        // duplicate check by post_id (only skip if the file still exists on disk)
+        // Duplicate check by post_id. Use the recorded path rather than the
+        // newly rendered one, so changing the filename template does not
+        // re-download a post that is already on disk under another name.
         if self.config.downloads.skip_duplicates {
             if let Some(db) = &self.db {
-                if db.exists_post(post.id).await.unwrap_or(false) && final_path.exists() {
-                    if let Some(queue) = &self.queue {
-                        queue.set_status(post_id, DownloadStatus::Completed).await;
+                if let Some(existing) = db.post_path(post.id).await.unwrap_or(None) {
+                    let existing_path = PathBuf::from(existing);
+                    if existing_path.exists() {
+                        if let Some(queue) = &self.queue {
+                            queue.set_status(post_id, DownloadStatus::Completed).await;
+                        }
+                        let mut st = self.stats.lock().await;
+                        st.skipped += 1;
+                        return DownloadOutcome {
+                            post_id: post.id,
+                            path: existing_path,
+                            size: 0,
+                            hash: String::new(),
+                            skipped: true,
+                            error: None,
+                        };
                     }
-                    let mut st = self.stats.lock().await;
-                    st.skipped += 1;
-                    return DownloadOutcome {
-                        post_id: post.id,
-                        path: final_path,
-                        size: 0,
-                        hash: String::new(),
-                        skipped: true,
-                        error: None,
-                    };
                 }
             }
         }
@@ -544,7 +549,9 @@ impl DownloadEngine {
             }
 
             retries += 1;
-            tracing::warn!("retrying {} (attempt {}): {}", post.id, retries, e);
+            // Expected retries (hotlink 404s, sample fallbacks) are routine.
+            // Keep them out of the progress display unless --verbose is set.
+            tracing::debug!("retrying {} (attempt {}): {}", post.id, retries, e);
             tokio::time::sleep(std::time::Duration::from_millis(
                 100 * 10u64.pow(retries.min(2) as u32),
             ))

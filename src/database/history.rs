@@ -144,6 +144,29 @@ impl HistoryDb {
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
     }
 
+    /// Path recorded for a completed post, if any. Used to skip the post even
+    /// when a newer filename template points at a different name.
+    pub async fn post_path(&self, post_id: i64) -> Result<Option<String>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            let res = c.query_row(
+                "SELECT local_path FROM downloads
+                 WHERE post_id=?1 AND status='completed'
+                 ORDER BY downloaded_at DESC LIMIT 1",
+                params![post_id],
+                |r| r.get(0),
+            );
+            match res {
+                Ok(path) => Ok(Some(path)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(AppError::from(e)),
+            }
+        })
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    }
+
     /// Path of one completed download with this hash, if any. Used to skip a
     /// duplicate only when the existing copy is still on disk.
     pub async fn hash_path(&self, hash: &str) -> Result<Option<String>> {
@@ -664,6 +687,19 @@ mod tests {
             Some("/tmp/new.png")
         );
         assert_eq!(db.hash_path("missing").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn post_path_tracks_the_completed_file() {
+        let db = HistoryDb::open_in_memory().unwrap();
+        db.insert(record(7, "hash", "/tmp/7.png", "2020-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.post_path(7).await.unwrap().as_deref(),
+            Some("/tmp/7.png")
+        );
+        assert_eq!(db.post_path(8).await.unwrap(), None);
     }
 
     #[tokio::test]

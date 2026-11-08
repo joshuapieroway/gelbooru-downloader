@@ -1,6 +1,6 @@
 use gelbooru_downloader::api::models::Post;
 use gelbooru_downloader::config::Config;
-use gelbooru_downloader::database::history::HistoryDb;
+use gelbooru_downloader::database::history::{DownloadRecord, HistoryDb, now};
 use gelbooru_downloader::downloader::engine::DownloadEngine;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -87,6 +87,47 @@ async fn interrupted_downloads_resume_from_the_queue() {
     assert_eq!(report.completed, 1);
     assert_eq!(report.failed, 0);
     assert!(dir.path().join("42_abc.png").exists());
+    assert!(db.queue_list(-1).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn changing_the_filename_template_does_not_redownload_existing_posts() {
+    let dir = tempdir().unwrap();
+    let old_path = dir.path().join("old_name.png");
+    std::fs::write(&old_path, png_bytes()).unwrap();
+
+    let mut cfg = Config::default();
+    cfg.downloads.directory = dir.path().to_string_lossy().to_string();
+    cfg.downloads.validate_files = false;
+    let db = Arc::new(HistoryDb::open_in_memory().unwrap());
+    db.insert(DownloadRecord {
+        id: None,
+        post_id: 77,
+        url: "http://example/x.png".into(),
+        local_path: old_path.to_string_lossy().to_string(),
+        file_size: 1,
+        file_hash: "hash".into(),
+        downloaded_at: now(),
+        tags: String::new(),
+        rating: String::new(),
+        status: "completed".into(),
+    })
+    .await
+    .unwrap();
+
+    let mut engine = DownloadEngine::new(cfg, Some(db.clone()));
+    engine.filename_template = Some("{id}_new.{ext}".to_string());
+    let post = Post {
+        id: 77,
+        md5: "abc".to_string(),
+        // This address must never be contacted: the history record wins.
+        file_url: "http://127.0.0.1:9/x.png".to_string(),
+        ..Post::default()
+    };
+    let out = engine.download_post(post, None).await;
+    assert!(out.skipped, "{out:?}");
+    assert_eq!(out.path, old_path);
+    assert!(!dir.path().join("77_new.png").exists());
     assert!(db.queue_list(-1).await.unwrap().is_empty());
 }
 

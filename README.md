@@ -78,6 +78,10 @@ the literal score. For example, `{score}_{score_raw}_{id}.{ext}` produces
 sortable names that still show the real score. `{score_desc}` is retained as an
 alias for `{score}`.
 
+A post already recorded in history is skipped even if the filename template
+changed, as long as the recorded file still exists. Use `--force` to download
+it again under the new template.
+
 Folder segments are separated by `/`; empty, `.`, and `..` segments are
 skipped and every segment is sanitized, so a template can never escape the
 download directory. The default filename template

@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-07
+
+Compare: [`v0.4.0...v0.4.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.4.0...v0.4.1)
+
+Keeps download progress clean and prevents duplicate sample downloads when a
+filename template changes.
+
+### Changed
+
+- Routine retry messages, including hotlink 404s that fall back to the sample
+  URL, are logged at debug level instead of warning. Use `--verbose` to see
+  them.
+
+### Fixed
+
+- A post already recorded in history is skipped even when the filename template
+  points at a new name, instead of downloading it again and possibly saving a
+  duplicate sample. `--force` still overrides this check.
+
 ## [0.4.0] - 2026-11-06
 
 Compare: [`v0.3.1...v0.4.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.3.1...v0.4.0)
