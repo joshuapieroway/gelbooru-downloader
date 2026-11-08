@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-08
+
+Compare: [`v0.4.2...v0.5.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.4.2...v0.5.0)
+
+Brings `batch`, `watch`, and presets into parity with `download`/`search` for
+ordering and rating control, and fails fast on invalid sort/order values.
+
+### Added
+
+- `batch --sort`, `batch --order`, `batch --rating` apply the same ordering to
+  every tag in the file; `watch --sort`, `watch --order`, `watch --rating`,
+  `watch --limit` control each poll.
+- `preset create` stores `--sort`, `--order`, and `--rating`; `preset run`
+  honours them and allows per-run overrides via `preset run --sort` / `--order`.
+- `validate_sort_order` check: invalid `--sort` / `--order` values exit with
+  a message listing allowed values (`score`, `id`, `width`, `height`, `created`,
+  `date`, `created_at`, `rating` and `asc`/`desc`) instead of silently
+  sorting by `id`.
+
+### Changed
+
+- Legacy presets without `sort`/`order` deserialize as `None` and behave as
+  before.
+
 ## [0.4.2] - 2026-11-08
 
 Compare: [`v0.4.1...v0.4.2`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.4.1...v0.4.2)

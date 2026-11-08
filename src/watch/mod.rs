@@ -21,6 +21,10 @@ pub struct Watcher {
     pub db: Arc<HistoryDb>,
     pub engine: DownloadEngine,
     pub filters: FilterRules,
+    pub rating: Option<String>,
+    pub limit: u32,
+    pub sort: Option<String>,
+    pub order: Option<String>,
     pub output_dir: Option<std::path::PathBuf>,
 }
 
@@ -34,11 +38,11 @@ impl Watcher {
             let last = self.db.get_watch_state(&self.tags).await.unwrap_or(0);
             let params = search::SearchParams {
                 tags: self.tags.clone(),
-                rating: None,
-                limit: 100,
+                rating: self.rating.clone(),
+                limit: self.limit,
                 page_size: self.cfg.search.page_size,
-                sort: None,
-                order: None,
+                sort: self.sort.clone(),
+                order: self.order.clone(),
                 filters: self.filters.clone(),
             };
 

@@ -12,6 +12,10 @@ pub struct Preset {
     #[serde(default)]
     pub rating: Option<String>,
     #[serde(default)]
+    pub sort: Option<String>,
+    #[serde(default)]
+    pub order: Option<String>,
+    #[serde(default)]
     pub min_width: Option<u32>,
     #[serde(default)]
     pub max_width: Option<u32>,

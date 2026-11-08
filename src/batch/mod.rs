@@ -41,6 +41,9 @@ impl BatchReport {
 pub struct BatchOptions {
     pub filters: FilterRules,
     pub limit_per_tag: u32,
+    pub rating: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
     pub output_dir: Option<PathBuf>,
     pub concurrent_jobs: usize,
 }
@@ -55,9 +58,13 @@ pub async fn run_batch(
     let BatchOptions {
         filters,
         limit_per_tag,
+        rating,
+        sort,
+        order,
         output_dir,
         concurrent_jobs,
     } = options;
+    crate::api::search::validate_sort_order(&sort, &order)?;
     let content = fs::read_to_string(path).await.map_err(AppError::Io)?;
     let mut seen = HashSet::new();
     let tags_list: Vec<String> = content
@@ -76,6 +83,9 @@ pub async fn run_batch(
         let client = client.clone();
         let cfg = cfg.clone();
         let filters = filters.clone();
+        let rating = rating.clone();
+        let sort = sort.clone();
+        let order = order.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem
                 .acquire()
@@ -83,11 +93,11 @@ pub async fn run_batch(
                 .map_err(|e| (tag.clone(), e.to_string()))?;
             let params = search::SearchParams {
                 tags: tag.clone(),
-                rating: None,
+                rating,
                 limit: limit_per_tag,
                 page_size: cfg.search.page_size,
-                sort: None,
-                order: None,
+                sort,
+                order,
                 filters,
             };
             let posts = search::search_all(&client, &cfg, &params)

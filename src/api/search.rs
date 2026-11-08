@@ -22,6 +22,43 @@ pub struct SearchParams {
     pub filters: FilterRules,
 }
 
+const VALID_SORTS: &[&str] = &[
+    "score",
+    "id",
+    "width",
+    "height",
+    "created",
+    "date",
+    "created_at",
+    "rating",
+];
+const VALID_ORDERS: &[&str] = &["asc", "desc"];
+
+/// Validate sort/order values early so CLI and batch/watch fail with a clear
+/// message instead of silently ignoring typos. Empty strings are treated as unset.
+pub fn validate_sort_order(sort: &Option<String>, order: &Option<String>) -> Result<()> {
+    use crate::utils::error::AppError;
+    if let Some(s) = sort {
+        let s = s.trim();
+        if !s.is_empty() && !VALID_SORTS.contains(&s.to_ascii_lowercase().as_str()) {
+            return Err(AppError::Config(format!(
+                "invalid --sort '{s}': expected one of {}",
+                VALID_SORTS.join(", ")
+            )));
+        }
+    }
+    if let Some(o) = order {
+        let o = o.trim();
+        if !o.is_empty() && !VALID_ORDERS.contains(&o.to_ascii_lowercase().as_str()) {
+            return Err(AppError::Config(format!(
+                "invalid --order '{o}': expected one of {}",
+                VALID_ORDERS.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl SearchParams {
     pub fn new(tags: String) -> Self {
         Self {
@@ -41,6 +78,7 @@ pub async fn search_all(
     cfg: &Config,
     params: &SearchParams,
 ) -> Result<Vec<Post>> {
+    validate_sort_order(&params.sort, &params.order)?;
     // An explicit `--rating` wins; otherwise the configured default applies.
     // `all`/`any` (or an empty value) disables the default, and a `rating:`
     // tag already present in the query takes precedence so a safe-by-default

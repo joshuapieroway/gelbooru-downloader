@@ -108,6 +108,12 @@ pub enum Commands {
         /// Maximum matching posts per tag (defaults to `search.default_limit`).
         #[arg(long)]
         limit: Option<u32>,
+        #[arg(long)]
+        rating: Option<String>,
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long, default_value = "desc")]
+        order: Option<String>,
         #[arg(long, default_value_t = 4)]
         jobs: usize,
     },
@@ -130,6 +136,15 @@ pub enum Commands {
         /// Poll interval in seconds (defaults to `watch.interval`).
         #[arg(long)]
         interval: Option<u64>,
+        #[arg(long)]
+        rating: Option<String>,
+        /// Maximum matching posts per poll (defaults to 100).
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long, default_value = "desc")]
+        order: Option<String>,
     },
     Repl,
     Config {
@@ -173,6 +188,12 @@ pub enum PresetCmd {
         /// Tags for the preset. Prompted interactively when omitted.
         #[arg(long)]
         tags: Option<String>,
+        #[arg(long)]
+        rating: Option<String>,
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long)]
+        order: Option<String>,
         /// Override the configured filename template when this preset runs.
         #[arg(long)]
         filename_template: Option<String>,
@@ -183,6 +204,12 @@ pub enum PresetCmd {
     List,
     Run {
         name: String,
+        /// Override sort for this run (overrides the stored preset).
+        #[arg(long)]
+        sort: Option<String>,
+        /// Override order for this run (overrides the stored preset).
+        #[arg(long)]
+        order: Option<String>,
     },
     Delete {
         name: String,
@@ -371,7 +398,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Batch { file, limit, jobs } => {
+        Commands::Batch {
+            file,
+            limit,
+            jobs,
+            rating,
+            sort,
+            order,
+        } => {
+            search::validate_sort_order(&sort, &order)?;
             let engine = DownloadEngine::new(cfg.clone(), db.clone());
             let report = batch::run_batch(
                 &file,
@@ -381,6 +416,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 batch::BatchOptions {
                     filters: FilterRules::default(),
                     limit_per_tag: limit.unwrap_or(cfg.search.default_limit),
+                    rating,
+                    sort,
+                    order,
                     output_dir: Some(cfg.download_dir()),
                     concurrent_jobs: jobs,
                 },
@@ -464,9 +502,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 PresetCmd::Create {
                     name,
                     tags,
+                    rating,
+                    sort,
+                    order,
                     filename_template,
                     folder_template,
                 } => {
+                    crate::api::search::validate_sort_order(&sort, &order)?;
                     let tags = match tags {
                         Some(tags) => tags,
                         None => {
@@ -482,6 +524,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                         name: name.clone(),
                         tags,
                         limit: cfg.search.default_limit,
+                        rating,
+                        sort,
+                        order,
                         filename_template,
                         folder_template,
                         ..Default::default()
@@ -499,19 +544,22 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                     pm.delete(&name).await?;
                     println!("Deleted {}", name);
                 }
-                PresetCmd::Run { name } => {
+                PresetCmd::Run { name, sort, order } => {
+                    crate::api::search::validate_sort_order(&sort, &order)?;
                     if let Some(preset) = pm.get(&name).await? {
                         let mut engine = DownloadEngine::new(cfg.clone(), Some(db.clone()));
                         engine.filename_template = preset.filename_template.clone();
                         engine.folder_template = preset.folder_template.clone();
                         let filters = preset.to_filter_rules();
+                        let effective_sort = sort.or(preset.sort.clone());
+                        let effective_order = order.or(preset.order.clone());
                         let params = search::SearchParams {
                             tags: preset.tags.clone(),
                             rating: preset.rating.clone(),
                             limit: preset.limit,
                             page_size: cfg.search.page_size,
-                            sort: None,
-                            order: None,
+                            sort: effective_sort,
+                            order: effective_order,
                             filters,
                         };
                         let posts = search::search_all(&client, &cfg, &params).await?;
@@ -554,7 +602,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Watch { tags, interval } => {
+        Commands::Watch {
+            tags,
+            interval,
+            rating,
+            limit,
+            sort,
+            order,
+        } => {
+            search::validate_sort_order(&sort, &order)?;
             let db = db
                 .clone()
                 .unwrap_or_else(|| Arc::new(HistoryDb::open_in_memory().unwrap()));
@@ -568,6 +624,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 db: db.clone(),
                 engine,
                 filters: FilterRules::default(),
+                rating,
+                limit: limit.unwrap_or(100),
+                sort,
+                order,
                 output_dir: Some(cfg.download_dir()),
             };
             let cancel = tokio_util::sync::CancellationToken::new();
