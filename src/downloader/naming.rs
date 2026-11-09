@@ -151,23 +151,31 @@ fn extract_character_name(tags: &str) -> String {
     }
 
     // Fall back to tags like "tangtang_(arknights)", "fluorite_(arknights)"
-    // These are common for characters when namespace tagging isn't used
+    // These are common for characters when namespace tagging isn't used.
+    // A tag is a candidate only if it has a non-empty name before "_(" and a
+    // non-empty, closed parenthesised suffix. Malformed tags (no ")") are
+    // skipped so they cannot shadow a later well-formed tag.
+    fn from_pattern(tag: &str) -> Option<String> {
+        let pos = tag.find("_(")?;
+        let name = &tag[..pos];
+        if name.is_empty() {
+            return None;
+        }
+        let after = &tag[pos + 2..];
+        let close = after.find(')')?;
+        let inner = &after[..close];
+        if inner.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{} ({})",
+            name.replace('_', " "),
+            inner.replace('_', " ")
+        ))
+    }
+
     tags.split_whitespace()
-        .find_map(|tag| {
-            // Match tags containing _( pattern (underscore followed by open paren)
-            tag.find("_(")
-                .map(|pos| {
-                    let name = &tag[..pos];
-                    // Format: name_(source) -> convert to "name (source)"
-                    // Extract content inside parentheses and replace underscores with spaces
-                    if let Some(end_paren) = tag[pos + 2..].chars().position(|c| c == ')') {
-                        let inner = &tag[pos + 2..pos + 2 + end_paren];
-                        format!("{} ({})", name.replace('_', " "), inner.replace('_', " "))
-                    } else {
-                        String::new()
-                    }
-                })
-        })
+        .find_map(from_pattern)
         .unwrap_or_default()
 }
 
@@ -401,5 +409,33 @@ mod tests {
             "Got path: {:?}",
             path
         );
+    }
+
+    #[test]
+    fn character_malformed_tags_do_not_shadow_later_match() {
+        // A tag with "_(" but no closing ")" must not stop the search; the
+        // next well-formed pattern tag should win.
+        let post = Post {
+            tags: "foo_(bar tangtang_(arknights)".to_string(),
+            ..Post::default()
+        };
+        let ctx = NamingContext {
+            post: &post,
+            sort_prefix: "",
+        };
+        assert_eq!(ctx.value("character"), "tangtang (arknights)");
+    }
+
+    #[test]
+    fn character_empty_parts_are_skipped() {
+        let post = Post {
+            tags: "_(arknights) tangtang_() good_(series)".to_string(),
+            ..Post::default()
+        };
+        let ctx = NamingContext {
+            post: &post,
+            sort_prefix: "",
+        };
+        assert_eq!(ctx.value("character"), "good (series)");
     }
 }

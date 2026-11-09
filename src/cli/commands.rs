@@ -74,7 +74,7 @@ pub enum Commands {
         ext: Vec<String>,
         #[arg(long)]
         sort: Option<String>,
-        #[arg(long, default_value = "desc")]
+        #[arg(long)]
         order: Option<String>,
     },
     Inspect {
@@ -100,7 +100,7 @@ pub enum Commands {
         folder_template: Option<String>,
         #[arg(long)]
         sort: Option<String>,
-        #[arg(long, default_value = "desc")]
+        #[arg(long)]
         order: Option<String>,
     },
     Batch {
@@ -112,7 +112,7 @@ pub enum Commands {
         rating: Option<String>,
         #[arg(long)]
         sort: Option<String>,
-        #[arg(long, default_value = "desc")]
+        #[arg(long)]
         order: Option<String>,
         #[arg(long, default_value_t = 4)]
         jobs: usize,
@@ -143,7 +143,7 @@ pub enum Commands {
         limit: Option<u32>,
         #[arg(long)]
         sort: Option<String>,
-        #[arg(long, default_value = "desc")]
+        #[arg(long)]
         order: Option<String>,
     },
     Repl,
@@ -410,7 +410,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             order,
         } => {
             search::validate_sort_order(&sort, &order)?;
-            let engine = DownloadEngine::new(cfg.clone(), db.clone());
+            let mut engine = DownloadEngine::new(cfg.clone(), db.clone());
+            engine.sort = sort.clone();
+            engine.order = order.clone();
             let report = batch::run_batch(
                 &file,
                 &client,
@@ -554,8 +556,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                         engine.filename_template = preset.filename_template.clone();
                         engine.folder_template = preset.folder_template.clone();
                         let filters = preset.to_filter_rules();
-                        let effective_sort = sort.or(preset.sort.clone());
-                        let effective_order = order.or(preset.order.clone());
+                        let effective_sort = sort.clone().or_else(|| preset.sort.clone());
+                        let effective_order = order.clone().or_else(|| preset.order.clone());
+                        engine.sort = effective_sort.clone();
+                        engine.order = effective_order.clone();
                         let params = search::SearchParams {
                             tags: preset.tags.clone(),
                             rating: preset.rating.clone(),
@@ -617,7 +621,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let db = db
                 .clone()
                 .unwrap_or_else(|| Arc::new(HistoryDb::open_in_memory().unwrap()));
-            let engine = DownloadEngine::new(cfg.clone(), Some(db.clone()));
+            let mut engine = DownloadEngine::new(cfg.clone(), Some(db.clone()));
+            engine.sort = sort.clone();
+            engine.order = order.clone();
             let interval = interval.unwrap_or(cfg.watch.interval).max(1);
             let watcher = Watcher {
                 tags: tags.clone(),

@@ -72,11 +72,23 @@ Available placeholders: `{id}`, `{md5}`, `{ext}`, `{rating}`, `{score}`,
 `{sort_prefix}`. Unknown placeholders render as an empty string, and `{{` /
 `}}` produce literal braces.
 
+`{character}` prefers `character:` namespace tags (e.g. `character:hero`),
+and falls back to tags matching `name_(series)`, e.g. `tangtang_(arknights)`
+→ `tangtang (arknights)`. A post with neither renders as an empty segment,
+which is skipped in the folder path. Every folder segment is sanitized with
+`sanitize_filename`, so a value like `tangtang (arknights)` is stored as
+`tangtang__arknights_`.
+
 `{score}` renders a fixed-width inverted score by default, so a normal
 alphabetical filename sort lists the highest score first. `{score_raw}` keeps
 the literal score. For example, `{score}_{score_raw}_{id}.{ext}` produces
 sortable names that still show the real score. `{score_desc}` is retained as an
 alias for `{score}`.
+
+`{sort_prefix}` is set from `--sort` / `--order` when the sort key is `score`
+or `id`. For other sort keys (`width`, `height`, `created`, `rating`) no
+prefix is emitted, but posts are still ordered server- and client-side. The
+default `desc` order applies when `--order` is omitted.
 
 A post already recorded in history is skipped even if the filename template
 changed, as long as the recorded file still exists. Use `--force` to download

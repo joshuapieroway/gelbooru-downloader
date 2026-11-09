@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-11-08
+
+Compare: [`v0.5.0...v0.5.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.5.0...v0.5.1)
+
+Revises the 0.5.0 tarball (rebuilt against the tagged `CHANGELOG.md`, adds
+SHA-256 checksums, and standardises the tarball name across releases) and
+fixes filename-prefix propagation for `batch`, `watch`, and `preset run`.
+The `{character}` fallback is hardened against malformed tags.
+
+### Fixed
+
+- `batch`, `watch`, and `preset run` now propagate `--sort` / `--order` to
+  the download engine, so `{sort_prefix}` is emitted there just like
+  `download` instead of only ordering the API response.
+- `--order` no longer defaults to `"desc"` at the CLI layer. Without
+  `--sort`, no `order` parameter is sent to the API; when `--sort` is
+  given, descending order still applies by default in sorting and
+  `{sort_prefix}` generation.
+- `{character}` fallback no longer stops at the first tag containing `_(`
+  when that tag has no closing `)`. Malformed tags are skipped and the
+  fallback uses a byte-accurate `find(')')` instead of a char-count index,
+  so multi-byte tags cannot mis-slice or panic. Tags with an empty name
+  (`_(arknights)`) or empty suffix (`tangtang_()`) are also skipped.
+- Rebuilt the `v0.5.0` tarball against the tagged sources: the shipped
+  `CHANGELOG.md` inside the archive now matches `v0.5.0`, the asset name
+  keeps the `gelbooru-downloader-<version>-<target>.tar.gz` form, and a
+  SHA-256 asset accompanies it. `v0.4.0` remains without a tarball; see
+  below.
+
 ## [0.5.0] - 2026-11-08
 
 Compare: [`v0.4.2...v0.5.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.4.2...v0.5.0)
