@@ -1,6 +1,6 @@
 # TODO — gelbooru-downloader
 
-Project version: 0.5.0 (2026-11-08)
+Project version: 0.5.1 (2026-11-08)
 Source of truth for planned work. Update as items ship; move done items to the bottom.
 
 ## High Priority — sort/filter parity
@@ -41,3 +41,4 @@ Source of truth for planned work. Update as items ship; move done items to the b
 - [x] Byte-based progress bars, preview prefetching, per-job queue tracking
 - [x] Restore `download --sort` / `--order` (v0.4.2) — removed in v0.4.0, now available again for tag downloads
 - [x] Sort/order parity + validation for `batch`, `watch`, `preset create/run` (v0.5.0) — `validate_sort_order` fails fast with allowed values
+- [x] Propagate `engine.sort`/`engine.order` in `batch`, `watch`, `preset run` so `{sort_prefix}` works there (v0.5.1) — removed spurious `order=desc` when no `--sort` given, hardened `{character}` fallback
