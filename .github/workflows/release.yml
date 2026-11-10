@@ -63,13 +63,13 @@ jobs:
 
       - name: Generate checksums
         run: |
-          sha256sum target/release/gelbooru > gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256
-          echo "Checksums: $(cat gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256)"
+          sha256sum target/release/gelbooru > gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256
+          echo "Checksums: $(cat gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256)"
 
       - name: Create tarball
         run: |
-          tar -czvf gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz -C target/release gelbooru
-          ls -lh gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz
+          tar -czvf gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz -C target/release gelbooru
+          ls -lh gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -77,8 +77,8 @@ jobs:
           name: gelbooru-linux-x86_64
           path: |
             target/release/gelbooru
-            gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz
-            gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256
+            gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz
+            gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256
 
       - name: Run tests
         run: cargo test --all
@@ -101,23 +101,27 @@ jobs:
       - name: Extract version from tag
         id: extract_version
         run: |
-          # Extract version from tag (v0.5.1 -> 0.5.1)
-          VERSION=$(echo "${GITHUB_REF_NAME#v}")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # For tag events, extract version (v0.5.1 -> 0.5.1)
+          # For workflow_dispatch, use the version input
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(echo "${GITHUB_REF_NAME#v}")
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          fi
 
       - name: Verify tarball
         run: |
-          ls -la gelbooru-*-linux-x86_64.tar.gz gelbooru-*-linux-x86_64.sha256
+          ls -la gelbooru-downloader-*-linux-x86_64.tar.gz gelbooru-downloader-*-linux-x86_64.sha256
 
       - name: Create GitHub Release
-        if: startsWith(github.event.repository.name, 'gelbooru-downloader')
         uses: softprops/action-gh-release@v2
         with:
-          name: gelbooru ${{ steps.extract_version.outputs.version }}
-          tag_name: ${{ steps.extract_version.outputs.version }}
+          name: gelbooru ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           files: |
-            gelbooru-${{ steps.extract_version.outputs.version }}-linux-x86_64.tar.gz
-            gelbooru-${{ steps.extract_version.outputs.version }}-linux-x86_64.sha256
+            gelbooru-downloader-${{ steps.extract_version.outputs.version }}-linux-x86_64.tar.gz
+            gelbooru-downloader-${{ steps.extract_version.outputs.version }}-linux-x86_64.sha256
           generate_release_notes: true
           draft: false
           prerelease: false
