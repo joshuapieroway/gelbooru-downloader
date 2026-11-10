@@ -249,7 +249,8 @@ impl DownloadEngine {
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("http client");
+            .map_err(|e| AppError::Http(e.to_string()))
+            .expect("http client builder configuration is valid");
         Self {
             client: http,
             config: Arc::new(config),
@@ -447,14 +448,34 @@ impl DownloadEngine {
             &sort_prefix,
         );
 
+        // if file already exists on disk, skip
+        if final_path.exists() && self.config.downloads.skip_duplicates {
+            if let Some(queue) = &self.queue {
+                queue.set_status(post_id, DownloadStatus::Completed).await;
+            }
+            let mut st = self.stats.lock().await;
+            st.skipped += 1;
+            return DownloadOutcome {
+                post_id: post.id,
+                path: final_path,
+                size: 0,
+                hash: String::new(),
+                skipped: true,
+                error: None,
+            };
+        }
+
         // Duplicate check by post_id. Use the recorded path rather than the
         // newly rendered one, so changing the filename template does not
         // re-download a post that is already on disk under another name.
+        // Only apply this check when the existing path is in the SAME directory
+        // as the target output_dir to prevent incorrect skipping.
         if self.config.downloads.skip_duplicates {
             if let Some(db) = &self.db {
                 if let Some(existing) = db.post_path(post.id).await.unwrap_or(None) {
-                    let existing_path = PathBuf::from(existing);
-                    if existing_path.exists() {
+                    let existing_path = PathBuf::from(&existing);
+                    // Only skip if the existing path is in the same directory as the target
+                    if existing_path.parent() == final_path.parent() && existing_path.exists() {
                         if let Some(queue) = &self.queue {
                             queue.set_status(post_id, DownloadStatus::Completed).await;
                         }
@@ -471,22 +492,6 @@ impl DownloadEngine {
                     }
                 }
             }
-        }
-        // if file already exists on disk, skip
-        if final_path.exists() && self.config.downloads.skip_duplicates {
-            if let Some(queue) = &self.queue {
-                queue.set_status(post_id, DownloadStatus::Completed).await;
-            }
-            let mut st = self.stats.lock().await;
-            st.skipped += 1;
-            return DownloadOutcome {
-                post_id: post.id,
-                path: final_path,
-                size: 0,
-                hash: String::new(),
-                skipped: true,
-                error: None,
-            };
         }
 
         let url = post.file_url.clone();
@@ -588,33 +593,6 @@ impl DownloadEngine {
         }
         match result {
             Ok((size, hash)) => {
-                // duplicate by hash
-                if self.config.downloads.skip_duplicates {
-                    if let Some(db) = &self.db {
-                        // Only drop the new file when the already-recorded copy
-                        // still exists on disk. A stale history row must not
-                        // cost the user the file they just downloaded.
-                        if let Some(existing) = db.hash_path(&hash).await.unwrap_or(None) {
-                            let existing_path = PathBuf::from(&existing);
-                            if existing_path != final_path && existing_path.exists() {
-                                let _ = tokio::fs::remove_file(&final_path).await;
-                                if let Some(queue) = &self.queue {
-                                    queue.set_status(post_id, DownloadStatus::Completed).await;
-                                }
-                                let mut st = self.stats.lock().await;
-                                st.skipped += 1;
-                                return DownloadOutcome {
-                                    post_id: post.id,
-                                    path: existing_path,
-                                    size,
-                                    hash,
-                                    skipped: true,
-                                    error: None,
-                                };
-                            }
-                        }
-                    }
-                }
                 // record history
                 if let Some(db) = &self.db {
                     let rec = DownloadRecord {

@@ -24,6 +24,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::time::Duration as TokioDuration;
 
+/// Helper to acquire a mutex lock, recovering gracefully from poisoning.
+/// Panicking threads can poison a mutex; this recovers the inner value
+/// rather than crashing on mutex poisoning.
+fn safe_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| {
+        tracing::warn!("TUI state mutex poisoned, recovering data");
+        e.into_inner()
+    })
+}
+
 const TABS: &[&str] = &["Search", "Queue", "History", "Stats"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -217,7 +227,7 @@ impl Drop for ScreenGuard {
 fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
     let page = page.max(1);
     let (client, query, per_page, seq) = {
-        let mut st = state.lock().unwrap();
+        let mut st = safe_lock(&state);
         st.search_seq = st.search_seq.wrapping_add(1);
         st.searching = true;
         st.search_error = None;
@@ -233,7 +243,7 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
     };
 
     let Some(client) = client else {
-        let mut st = state.lock().unwrap();
+        let mut st = safe_lock(&state);
         if st.search_seq == seq {
             st.searching = false;
             st.search_error = Some("No API client".to_string());
@@ -245,7 +255,7 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
         let result = client
             .search_page(&query, per_page as u32, page as u32, None, None)
             .await;
-        let mut st = state.lock().unwrap();
+        let mut st = safe_lock(&state);
         if st.search_seq != seq {
             return;
         }
@@ -459,14 +469,14 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
 
     loop {
         let poll_due = {
-            let st = state.lock().unwrap();
+            let st = safe_lock(&state);
             st.last_poll.elapsed() >= TokioDuration::from_secs(1)
         };
         if poll_due {
             // Never hold the state mutex across an await: DB work runs on a
             // blocking thread and search callbacks need the lock to publish
             // their results.
-            let db = state.lock().unwrap().db.clone();
+            let db = safe_lock(&state).db.clone();
             let mut completed = None;
             let mut history = None;
             if let Some(db) = db {
@@ -479,7 +489,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
             }
             let snapshots = progress::read_snapshots();
             let now = Instant::now();
-            let mut st = state.lock().unwrap();
+            let mut st = safe_lock(&state);
             if let Some(c) = completed {
                 st.completed = c;
             }
@@ -490,12 +500,12 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
             st.last_poll = now;
             st.tick = st.tick.wrapping_add(1);
         } else {
-            let mut st = state.lock().unwrap();
+            let mut st = safe_lock(&state);
             st.tick = st.tick.wrapping_add(1);
         }
 
         terminal.draw(|f| {
-            let st = state.lock().unwrap();
+            let st = safe_lock(&state);
             draw(f, &st);
         })?;
 
@@ -511,7 +521,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                         return Ok(());
                     }
                     let action = {
-                        let mut st = state.lock().unwrap();
+                        let mut st = safe_lock(&state);
                         handle_key(&mut st, k.code)
                     };
                     match action {
@@ -524,7 +534,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                     }
                 }
                 Event::Mouse(m) => {
-                    let mut st = state.lock().unwrap();
+                    let mut st = safe_lock(&state);
                     match m.kind {
                         MouseEventKind::ScrollUp if st.tab == 0 => {
                             st.scroll = st.scroll.saturating_sub(3);

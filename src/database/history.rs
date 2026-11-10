@@ -7,6 +7,16 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// Helper to acquire a mutex lock, recovering gracefully from poisoning.
+/// Panicking threads can poison a mutex; this recovers the inner value
+/// rather than crashing on mutex poisoning.
+fn safe_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| {
+        tracing::warn!("Mutex poisoned, recovering data");
+        e.into_inner()
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadRecord {
     pub id: Option<i64>,
@@ -94,7 +104,7 @@ impl HistoryDb {
     pub async fn insert(&self, rec: DownloadRecord) -> Result<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute(
                 "INSERT INTO downloads (post_id,url,local_path,file_size,file_hash,downloaded_at,tags,rating,status)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
@@ -112,7 +122,7 @@ impl HistoryDb {
     pub async fn exists_post(&self, post_id: i64) -> Result<bool> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let count: i64 = c
                 .query_row(
                     "SELECT COUNT(*) FROM downloads WHERE post_id=?1 AND status='completed'",
@@ -130,7 +140,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let hash = hash.to_string();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let count: i64 = c
                 .query_row(
                     "SELECT COUNT(*) FROM downloads WHERE file_hash=?1 AND file_hash<>''",
@@ -149,7 +159,7 @@ impl HistoryDb {
     pub async fn post_path(&self, post_id: i64) -> Result<Option<String>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let res = c.query_row(
                 "SELECT local_path FROM downloads
                  WHERE post_id=?1 AND status='completed'
@@ -173,7 +183,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let hash = hash.to_string();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let res = c.query_row(
                 "SELECT local_path FROM downloads
                  WHERE file_hash=?1 AND file_hash<>'' AND status='completed'
@@ -194,7 +204,7 @@ impl HistoryDb {
     pub async fn list(&self, limit: i64, search: Option<String>) -> Result<Vec<DownloadRecord>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let mut out = Vec::new();
             if let Some(q) = &search {
                 let pattern = format!("%{}%", q);
@@ -225,7 +235,7 @@ impl HistoryDb {
     pub async fn count(&self) -> Result<i64> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let n: i64 = c
                 .query_row("SELECT COUNT(*) FROM downloads", [], |r| r.get(0))
                 .map_err(AppError::from)?;
@@ -238,7 +248,7 @@ impl HistoryDb {
     pub async fn delete_by_post(&self, post_id: i64) -> Result<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute("DELETE FROM downloads WHERE post_id=?1", params![post_id])
                 .map_err(AppError::from)?;
             Ok(())
@@ -250,7 +260,7 @@ impl HistoryDb {
     pub async fn clear(&self) -> Result<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute("DELETE FROM downloads", [])
                 .map_err(AppError::from)?;
             Ok(())
@@ -263,7 +273,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let tags = tags.to_string();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let res = c.query_row(
                 "SELECT last_seen_id FROM watch_state WHERE tags=?1",
                 params![tags],
@@ -283,7 +293,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let tags = tags.to_string();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute(
                 "INSERT INTO watch_state (tags,last_seen_id) VALUES (?1,?2)
                  ON CONFLICT(tags) DO UPDATE SET last_seen_id=excluded.last_seen_id",
@@ -300,7 +310,7 @@ impl HistoryDb {
     pub async fn list_presets(&self) -> Result<Vec<(String, String)>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let mut stmt = c
                 .prepare("SELECT name,data FROM presets")
                 .map_err(AppError::from)?;
@@ -322,7 +332,7 @@ impl HistoryDb {
         let name = name.to_string();
         let data = data.to_string();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute(
                 "INSERT INTO presets (name,data) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET data=excluded.data",
                 params![name, data],
@@ -335,7 +345,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let name = name.to_string();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute("DELETE FROM presets WHERE name=?1", params![name])
                 .map_err(AppError::from)?;
             Ok(())
@@ -348,7 +358,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let name = name.to_string();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let res = c.query_row(
                 "SELECT data FROM presets WHERE name=?1",
                 params![name],
@@ -381,7 +391,7 @@ impl HistoryDb {
         let post_json = serde_json::to_string(&post)?;
         let now = now();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute(
                 "INSERT INTO download_queue
                     (post_id,post_json,output_dir,filename_template,folder_template,sort,\"order\",status,error,attempts,created_at,updated_at)
@@ -424,7 +434,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let now = now();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute(
                 "UPDATE download_queue
                  SET status='downloading', error=NULL, attempts=attempts+1, updated_at=?1
@@ -443,7 +453,7 @@ impl HistoryDb {
         let error = error.to_string();
         let now = now();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute(
                 "UPDATE download_queue SET status='failed', error=?1, updated_at=?2 WHERE id=?3",
                 params![error, now, id],
@@ -458,7 +468,7 @@ impl HistoryDb {
     pub async fn queue_remove(&self, id: i64) -> Result<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             c.execute("DELETE FROM download_queue WHERE id=?1", params![id])
                 .map_err(AppError::from)?;
             Ok(())
@@ -490,7 +500,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let limit = limit.unwrap_or(-1);
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let mut stmt = c
                 .prepare(&format!(
                     "SELECT id,post_id,post_json,output_dir,filename_template,folder_template,
@@ -519,7 +529,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let now = now();
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let changed = c
                 .execute(
                     "UPDATE download_queue SET status='queued', error=NULL, updated_at=?1
@@ -538,7 +548,7 @@ impl HistoryDb {
         let conn = self.conn.clone();
         let status = status.map(str::to_string);
         tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
+            let c = safe_lock(&conn);
             let changed = match status {
                 Some(status) => c.execute(
                     "DELETE FROM download_queue WHERE status=?1",
@@ -556,10 +566,21 @@ impl HistoryDb {
 
 fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedDownload> {
     let post_json: String = row.get(2)?;
+    let post = match serde_json::from_str(&post_json) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to deserialize queued post JSON for post_id {}: {}",
+                row.get::<_, i64>(1).unwrap_or(0),
+                e
+            );
+            serde_json::from_str(&post_json).unwrap_or_else(|_| Post::default())
+        }
+    };
     Ok(QueuedDownload {
         id: row.get(0)?,
         post_id: row.get(1)?,
-        post: serde_json::from_str(&post_json).unwrap_or_default(),
+        post,
         output_dir: row.get(3)?,
         filename_template: row.get(4)?,
         folder_template: row.get(5)?,

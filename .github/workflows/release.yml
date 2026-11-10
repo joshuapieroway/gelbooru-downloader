@@ -1,0 +1,125 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 0.5.1)'
+        required: true
+        default: '0.5.1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Read Cargo.toml version
+        id: version
+        run: |
+          VERSION=$(grep '^version =' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          rust-version: 1.85
+          components: rustfmt, clippy
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run cargo fmt --check
+        run: cargo fmt --check
+
+      - name: Run cargo clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Extract version for artifacts
+        id: artifact_version
+        run: |
+          VERSION=$(grep '^version =' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Generate checksums
+        run: |
+          sha256sum target/release/gelbooru > gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256
+          echo "Checksums: $(cat gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256)"
+
+      - name: Create tarball
+        run: |
+          tar -czvf gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz -C target/release gelbooru
+          ls -lh gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gelbooru-linux-x86_64
+          path: |
+            target/release/gelbooru
+            gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz
+            gelbooru-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256
+
+      - name: Run tests
+        run: cargo test --all
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    outputs:
+      version: ${{ steps.extract_version.outputs.version }}
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: gelbooru-linux-x86_64
+          path: .
+
+      - name: Extract version from tag
+        id: extract_version
+        run: |
+          # Extract version from tag (v0.5.1 -> 0.5.1)
+          VERSION=$(echo "${GITHUB_REF_NAME#v}")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Verify tarball
+        run: |
+          ls -la gelbooru-*-linux-x86_64.tar.gz gelbooru-*-linux-x86_64.sha256
+
+      - name: Create GitHub Release
+        if: startsWith(github.event.repository.name, 'gelbooru-downloader')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: gelbooru ${{ steps.extract_version.outputs.version }}
+          tag_name: ${{ steps.extract_version.outputs.version }}
+          files: |
+            gelbooru-${{ steps.extract_version.outputs.version }}-linux-x86_64.tar.gz
+            gelbooru-${{ steps.extract_version.outputs.version }}-linux-x86_64.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

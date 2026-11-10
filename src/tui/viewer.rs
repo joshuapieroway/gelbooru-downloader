@@ -1626,7 +1626,7 @@ fn place_image(post: &Post, path: &Path, rect: Rect) -> Result<(), String> {
         .map_err(|e| format!("Could not start kitty icat: {e}"))?;
 
     let result = wait_child(&mut child, ICAT_TIMEOUT);
-    let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Hide);
+    let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Show);
 
     match result {
         Ok(true) => Ok(()),
