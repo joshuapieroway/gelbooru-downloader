@@ -51,6 +51,10 @@ pub struct DownloadsConfig {
     pub filename_template: String,
     #[serde(default)]
     pub folder_template: String,
+    /// Directory for quick downloads from the image viewer. Empty/unset
+    /// defaults to `<download_dir>/quick-downloads`.
+    #[serde(default)]
+    pub quick_download_directory: Option<String>,
 }
 
 fn default_dir() -> String {
@@ -81,6 +85,7 @@ impl Default for DownloadsConfig {
             bandwidth_limit: None,
             filename_template: default_filename_template(),
             folder_template: String::new(),
+            quick_download_directory: None,
         }
     }
 }
@@ -205,6 +210,13 @@ impl Config {
         crate::utils::paths::expand_tilde(&self.downloads.directory)
     }
 
+    pub fn quick_download_dir(&self) -> PathBuf {
+        match &self.downloads.quick_download_directory {
+            Some(p) if !p.trim().is_empty() => crate::utils::paths::expand_tilde(p),
+            _ => self.download_dir().join("quick-downloads"),
+        }
+    }
+
     /// Apply environment variable overrides.
     pub fn apply_env(&mut self) {
         if let Ok(v) = std::env::var("GELBOORU_BASE_URL") {
@@ -218,6 +230,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("GELBOORU_DOWNLOAD_DIR") {
             self.downloads.directory = v;
+        }
+        if let Ok(v) = std::env::var("GELBOORU_QUICK_DOWNLOAD_DIR") {
+            self.downloads.quick_download_directory = Some(v);
         }
         if let Ok(v) = std::env::var("GELBOORU_CONCURRENCY") {
             if let Ok(n) = v.parse() {

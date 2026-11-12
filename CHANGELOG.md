@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] - 2026-11-12
+
+Patch release: configurable quick download directory.
+
+### Added
+
+- `[downloads] quick_download_directory` config option (and
+  `GELBOORU_QUICK_DOWNLOAD_DIR` env var). Defaults to
+  `<download_dir>/quick-downloads` when unset.
+
 ## [0.6.5] - 2026-11-12
 
 Patch release: sidebar toggle now resizes the image immediately.

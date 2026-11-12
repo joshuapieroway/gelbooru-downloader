@@ -1716,7 +1716,7 @@ fn human_bytes(n: u64) -> String {
 /// directory (the default is `~/Pictures/Gelbooru`), so they never mix with a
 /// user's curated library.
 fn quick_download_dir(cfg: &Config) -> PathBuf {
-    cfg.download_dir().join("quick-downloads")
+    cfg.quick_download_dir()
 }
 
 /// Render a path with the home directory abbreviated to `~` for the footer.
