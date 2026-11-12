@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-11-12
+
+Patch release: wider columns, no spacing.
+
+### Changed
+
+- Search results table: removed column spacing and widened Rating column so
+  full ratings (e.g. "questionable") are visible.
+
 ## [0.6.7] - 2026-11-12
 
 Patch release: search results columns reordered.

@@ -326,12 +326,18 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
                 }
             }
             let unique: Vec<String> = unique.into_iter().collect();
-            if let Ok(fetched) = client.tags_by_names(&unique).await {
-                let mut cache = app_tag_type_cache()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                for (name, ty) in fetched {
-                    cache.insert(name, ty);
+            match client.tags_by_names(&unique).await {
+                Ok(fetched) => {
+                    eprintln!("TAGFETCH ok: {} tags", fetched.len());
+                    let mut cache = app_tag_type_cache()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    for (name, ty) in fetched {
+                        cache.insert(name, ty);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("TAGFETCH err: {}", e);
                 }
             }
         }
@@ -1039,11 +1045,11 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
 
     let header = ["Rating", "Score", "Character", "Series", "Tags"];
     let widths = [
-        Constraint::Percentage(10),
-        Constraint::Percentage(8),
+        Constraint::Percentage(16),
+        Constraint::Percentage(7),
         Constraint::Percentage(20),
         Constraint::Percentage(20),
-        Constraint::Percentage(42),
+        Constraint::Percentage(37),
     ];
     let selected = if app.results.is_empty() {
         None
@@ -1105,6 +1111,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     };
 
     let table = Table::new(rows, widths)
+        .column_spacing(0)
         .header(Row::new(
             header
                 .iter()

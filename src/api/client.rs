@@ -280,40 +280,52 @@ impl GelbooruClient {
         Ok(out)
     }
 
-    /// Fetch tag metadata (name -> type) for the given tag names in one request.
+    /// Fetch tag metadata (name -> type) for the given tag names. Names are
+    /// batched to avoid overly long request URLs (servers reject very large
+    /// `names=` values), and results are merged.
     pub async fn tags_by_names(&self, names: &[String]) -> Result<Vec<(String, i64)>> {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        let url = format!("{}/index.php", self.base_url);
-        let joined = names.join(" ");
-        let mut req = self.http.get(&url).query(&[
-            ("page", "dapi"),
-            ("s", "tag"),
-            ("q", "index"),
-            ("names", &joined),
-            ("limit", "1000"),
-            ("json", "1"),
-        ]);
-        req = self.apply_auth(req);
-        let resp = self.send_with_retry(req).await?;
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| AppError::Http(e.to_string()))?;
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| AppError::Api(format!("json parse: {}", e)))?;
+        const BATCH: usize = 50;
         let mut out = Vec::new();
-        if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
-            for t in arr {
-                let name = t
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let ty = t.get("type").and_then(|c| c.as_i64()).unwrap_or(0);
-                if !name.is_empty() {
-                    out.push((name, ty));
+        for chunk in names.chunks(BATCH) {
+            let url = format!("{}/index.php", self.base_url);
+            let joined = chunk.join(" ");
+            let mut req = self.http.get(&url).query(&[
+                ("page", "dapi"),
+                ("s", "tag"),
+                ("q", "index"),
+                ("names", &joined),
+                ("limit", "1000"),
+                ("json", "1"),
+            ]);
+            req = self.apply_auth(req);
+            let resp = self.send_with_retry(req).await?;
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| AppError::Http(e.to_string()))?;
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| AppError::Api(format!("json parse: {}", e)))?;
+            if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
+                for t in arr {
+                    let name = t
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let ty = t.get("type").and_then(|c| c.as_i64()).unwrap_or(0);
+                    if !name.is_empty() {
+                        out.push((name, ty));
+                    }
+                }
+            } else if let Some(t) = v.get("tag") {
+                if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
+                    let ty = t.get("type").and_then(|c| c.as_i64()).unwrap_or(0);
+                    if !name.is_empty() {
+                        out.push((name.to_string(), ty));
+                    }
                 }
             }
         }
