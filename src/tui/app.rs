@@ -21,7 +21,7 @@ use ratatui::widgets::{
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::time::Duration as TokioDuration;
 
@@ -70,6 +70,30 @@ struct JobSample {
     bytes: u64,
     finished: usize,
     at: Instant,
+}
+
+/// Process-wide cache of tag name -> tag type, used to render the Character /
+/// Series columns in the search results. Populated during search.
+static APP_TAG_TYPE_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+
+fn app_tag_type_cache() -> &'static Mutex<HashMap<String, i64>> {
+    APP_TAG_TYPE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tags_of_type(post: &Post, ty: i64) -> String {
+    let cache = app_tag_type_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let out: Vec<String> = post
+        .tag_list()
+        .into_iter()
+        .filter(|t| cache.get(t).copied().unwrap_or(0) == ty)
+        .collect();
+    if out.is_empty() {
+        "-".to_string()
+    } else {
+        out.join(", ")
+    }
 }
 
 struct AppState {
@@ -291,6 +315,27 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
         let result = client
             .search_page(&query, per_page as u32, page as u32, None, None)
             .await;
+
+        // Fetch tag types for the page so the Character/Series columns can
+        // be rendered without a per-row request.
+        if let Ok((posts, _)) = &result {
+            let mut unique: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for p in posts {
+                for t in p.tag_list() {
+                    unique.insert(t);
+                }
+            }
+            let unique: Vec<String> = unique.into_iter().collect();
+            if let Ok(fetched) = client.tags_by_names(&unique).await {
+                let mut cache = app_tag_type_cache()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                for (name, ty) in fetched {
+                    cache.insert(name, ty);
+                }
+            }
+        }
+
         let mut st = safe_lock(&state);
         if st.search_seq != seq {
             return;
@@ -992,13 +1037,13 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         ])
         .split(area);
 
-    let header = ["ID", "Rating", "Size", "Score", "Tags"];
+    let header = ["Rating", "Score", "Character", "Series", "Tags"];
     let widths = [
         Constraint::Percentage(10),
-        Constraint::Percentage(12),
-        Constraint::Percentage(15),
         Constraint::Percentage(8),
-        Constraint::Percentage(55),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(42),
     ];
     let selected = if app.results.is_empty() {
         None
@@ -1047,11 +1092,11 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     Style::default()
                 };
                 Row::new(vec![
-                    Cell::from(p.id.to_string()),
                     Cell::from(p.rating.clone())
                         .style(Style::default().fg(rating_color(&p.rating))),
-                    Cell::from(format!("{}x{}", p.width, p.height)),
                     Cell::from(p.score.to_string()),
+                    Cell::from(truncate_chars(&tags_of_type(p, 4), 28)),
+                    Cell::from(truncate_chars(&tags_of_type(p, 3), 28)),
                     Cell::from(truncate_chars(&p.tags, 60)),
                 ])
                 .style(style)
