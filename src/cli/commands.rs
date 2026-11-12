@@ -437,7 +437,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                     std::fs::write(&file, w)?;
                 }
                 other => {
-                    anyhow::bail!("unsupported export format '{}': expected 'json' or 'csv'", other);
+                    anyhow::bail!(
+                        "unsupported export format '{}': expected 'json' or 'csv'",
+                        other
+                    );
                 }
             }
             if !cli.quiet {

@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-11
+
+Compare: [`v0.6.0...v0.6.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.6.0...v0.6.1)
+
+Patch release: autocomplete now uses Gelbooru's `autocomplete2` endpoint so
+suggestions are sorted by post count (most first), matching the website.
+
+### Fixed
+
+- TUI tag autocomplete switched from the tag DAPI (id order, capped at 200)
+  to the `autocomplete2` endpoint, which returns the top matches sorted by
+  post count. Typing "rem" now surfaces "remilia scarlet", "rem (re:zero)",
+  etc. instead of missing high-count tags.
+- Restored the `tags_by_names` client method (used for artist/character/
+  series categorization in the viewer) that was accidentally removed.
+
 ## [0.6.0] - 2026-11-11
 
 Compare: [`v0.5.1...v0.6.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.5.1...v0.6.0)

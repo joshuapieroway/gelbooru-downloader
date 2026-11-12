@@ -259,10 +259,11 @@ impl Drop for ScreenGuard {
 /// Start (or restart) a search for the current query on `page`. Responses are
 /// tagged with a sequence number so stale requests cannot overwrite newer
 /// results when the user pages quickly or changes the page size.
+#[allow(clippy::needless_borrow)]
 fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
     let page = page.max(1);
     let (client, query, per_page, seq) = {
-        let mut st = safe_lock(&state);
+        let mut st = safe_lock(state);
         st.search_seq = st.search_seq.wrapping_add(1);
         st.searching = true;
         st.search_error = None;
@@ -278,7 +279,7 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
     };
 
     let Some(client) = client else {
-        let mut st = safe_lock(&state);
+        let mut st = safe_lock(state);
         if st.search_seq == seq {
             st.searching = false;
             st.search_error = Some("No API client".to_string());
@@ -301,7 +302,7 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
                 // downloadable through the CLI (`gelbooru download`).
                 st.results = posts
                     .into_iter()
-                    .filter(|p| p.extension().to_ascii_lowercase() != "mp4")
+                    .filter(|p| !p.extension().eq_ignore_ascii_case("mp4"))
                     .collect();
                 st.search_total = total;
                 st.search_page = page;
@@ -354,7 +355,12 @@ fn persist_search_history(history: &[String]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let trimmed: Vec<&String> = history.iter().rev().take(MAX_SEARCH_HISTORY).rev().collect();
+    let trimmed: Vec<&String> = history
+        .iter()
+        .rev()
+        .take(MAX_SEARCH_HISTORY)
+        .rev()
+        .collect();
     let content = trimmed
         .iter()
         .map(|s| s.as_str())
@@ -365,9 +371,10 @@ fn persist_search_history(history: &[String]) {
 
 /// Start (or restart) an autocomplete request for `prefix`. Stale responses are
 /// ignored via a sequence number, mirroring `begin_search`.
+#[allow(clippy::needless_borrow)]
 fn begin_suggest(state: &Arc<Mutex<AppState>>, prefix: String) {
     if prefix.is_empty() {
-        let mut st = safe_lock(&state);
+        let mut st = safe_lock(state);
         st.suggestions.clear();
         st.suggestion_selected = None;
         st.suggest_scroll = 0;
@@ -375,7 +382,7 @@ fn begin_suggest(state: &Arc<Mutex<AppState>>, prefix: String) {
         return;
     }
     let (client, seq) = {
-        let mut st = safe_lock(&state);
+        let mut st = safe_lock(state);
         st.suggest_seq = st.suggest_seq.wrapping_add(1);
         st.suggesting = true;
         st.suggestions.clear();
@@ -385,7 +392,7 @@ fn begin_suggest(state: &Arc<Mutex<AppState>>, prefix: String) {
     };
 
     let Some(client) = client else {
-        let mut st = safe_lock(&state);
+        let mut st = safe_lock(state);
         if st.suggest_seq == seq {
             st.suggesting = false;
         }
@@ -623,15 +630,13 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                         }
                     }
                 }
-                KeyCode::PageDown => {
-                    if !st.suggestions.is_empty() {
-                        let i = st.suggestion_selected.unwrap_or(0);
-                        let newi = (i + 8).min(st.suggestions.len().saturating_sub(1));
-                        st.suggestion_selected = Some(newi);
-                        let visible = 8usize;
-                        if newi >= st.suggest_scroll + visible {
-                            st.suggest_scroll = newi + 1 - visible;
-                        }
+                KeyCode::PageDown if !st.suggestions.is_empty() => {
+                    let i = st.suggestion_selected.unwrap_or(0);
+                    let newi = (i + 8).min(st.suggestions.len().saturating_sub(1));
+                    st.suggestion_selected = Some(newi);
+                    let visible = 8usize;
+                    if newi >= st.suggest_scroll + visible {
+                        st.suggest_scroll = newi + 1 - visible;
                     }
                 }
                 _ => {}
@@ -798,14 +803,14 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
 
     loop {
         let poll_due = {
-            let st = safe_lock(&state);
+            let st = safe_lock(state.as_ref());
             st.last_poll.elapsed() >= TokioDuration::from_secs(1)
         };
         if poll_due {
             // Never hold the state mutex across an await: DB work runs on a
             // blocking thread and search callbacks need the lock to publish
             // their results.
-            let db = safe_lock(&state).db.clone();
+            let db = safe_lock(state.as_ref()).db.clone();
             let mut completed = None;
             let mut history = None;
             if let Some(db) = db {
@@ -818,7 +823,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
             }
             let snapshots = progress::read_snapshots();
             let now = Instant::now();
-            let mut st = safe_lock(&state);
+            let mut st = safe_lock(state.as_ref());
             if let Some(c) = completed {
                 st.completed = c;
             }
@@ -829,12 +834,12 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
             st.last_poll = now;
             st.tick = st.tick.wrapping_add(1);
         } else {
-            let mut st = safe_lock(&state);
+            let mut st = safe_lock(state.as_ref());
             st.tick = st.tick.wrapping_add(1);
         }
 
         terminal.draw(|f| {
-            let st = safe_lock(&state);
+            let st = safe_lock(state.as_ref());
             draw(f, &st);
         })?;
 
@@ -850,7 +855,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                         return Ok(());
                     }
                     let action = {
-                        let mut st = safe_lock(&state);
+                        let mut st = safe_lock(state.as_ref());
                         handle_key(&mut st, k.code, k.modifiers)
                     };
                     match action {
@@ -864,7 +869,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                     }
                 }
                 Event::Mouse(m) => {
-                    let mut st = safe_lock(&state);
+                    let mut st = safe_lock(state.as_ref());
                     match m.kind {
                         MouseEventKind::ScrollUp if st.tab == 0 => {
                             st.scroll = st.scroll.saturating_sub(3);
@@ -899,9 +904,7 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             "Gelbooru Downloader",
-            Style::default()
-                .fg(C_ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
@@ -967,10 +970,18 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
 }
 
 fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
-    let sug_height = if app.mode == Mode::SearchInput { 10u16 } else { 0u16 };
+    let sug_height = if app.mode == Mode::SearchInput {
+        10u16
+    } else {
+        0u16
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(sug_height), Constraint::Length(3)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(sug_height),
+            Constraint::Length(3),
+        ])
         .split(area);
 
     let header = ["ID", "Rating", "Size", "Score", "Tags"];
@@ -1045,11 +1056,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             header
                 .iter()
                 .map(|h| {
-                    Cell::from(*h).style(
-                        Style::default()
-                            .fg(C_ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    )
+                    Cell::from(*h).style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
                 })
                 .collect::<Vec<_>>(),
         ))
@@ -1086,9 +1093,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let input = Paragraph::new(Line::from(vec![
         Span::styled(
             "Query: ",
-            Style::default()
-                .fg(C_ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(app.query.clone(), input_style),
         Span::styled(
@@ -1111,7 +1116,9 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     if app.mode == Mode::SearchInput && chunks[1].height > 0 {
         let visible = chunks[1].height.saturating_sub(2) as usize; // borders
         let visible = visible.max(1);
-        let start = app.suggest_scroll.min(app.suggestions.len().saturating_sub(1));
+        let start = app
+            .suggest_scroll
+            .min(app.suggestions.len().saturating_sub(1));
         let end = (start + visible).min(app.suggestions.len());
         let mut lines: Vec<Line> = Vec::new();
         if app.suggesting && app.suggestions.is_empty() {
@@ -1142,12 +1149,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             }
             if app.suggestions.len() > visible {
                 lines.push(Line::from(Span::styled(
-                    format!(
-                        "  {}-{} of {}",
-                        start + 1,
-                        end,
-                        app.suggestions.len()
-                    ),
+                    format!("  {}-{} of {}", start + 1, end, app.suggestions.len()),
                     Style::default().fg(C_MUTED),
                 )));
             }
@@ -1164,7 +1166,6 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
 
     f.render_widget(input, chunks[2]);
 }
-
 
 fn queue_label(snapshot: &ProgressSnapshot) -> String {
     if let Some(out_name) = snapshot.output_name() {
@@ -1255,11 +1256,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             header
                 .iter()
                 .map(|h| {
-                    Cell::from(*h).style(
-                        Style::default()
-                            .fg(C_ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    )
+                    Cell::from(*h).style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
                 })
                 .collect::<Vec<_>>(),
         ))
@@ -1336,11 +1333,7 @@ fn draw_history(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             header
                 .iter()
                 .map(|h| {
-                    Cell::from(*h).style(
-                        Style::default()
-                            .fg(C_ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    )
+                    Cell::from(*h).style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
                 })
                 .collect::<Vec<_>>(),
         ))
@@ -1365,9 +1358,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         Line::from(vec![
             Span::styled(
                 "Completed: ",
-                Style::default()
-                    .fg(C_OK)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(C_OK).add_modifier(Modifier::BOLD),
             ),
             Span::raw(app.completed.to_string()),
         ]),
@@ -1381,27 +1372,21 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         Line::from(vec![
             Span::styled(
                 "Skipped:    ",
-                Style::default()
-                    .fg(C_WARN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
             ),
             Span::raw(app.prog_skipped.to_string()),
         ]),
         Line::from(vec![
             Span::styled(
                 "Bytes:      ",
-                Style::default()
-                    .fg(C_ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::raw(bytes_str),
         ]),
         Line::from(vec![
             Span::styled(
                 "Speed:      ",
-                Style::default()
-                    .fg(C_SPEED)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(C_SPEED).add_modifier(Modifier::BOLD),
             ),
             Span::raw(if app.speed_bps > 0.0 {
                 format!("{:.2} MB/s", app.speed_bps / 1_048_576.0)
@@ -1412,9 +1397,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         Line::from(vec![
             Span::styled(
                 "Live:       ",
-                Style::default()
-                    .fg(C_WARN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
             ),
             Span::raw(if app.prog_total > 0 {
                 format!("{}/{}", app.prog_completed, app.prog_total)

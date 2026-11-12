@@ -27,7 +27,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
@@ -148,6 +148,48 @@ impl TagState {
 /// allows navigation past the bounds of `posts` to fetch adjacent pages from the
 /// API, enabling indefinite browsing through the search results.
 /// Pressing `d` queues downloads that show progress in the status area.
+/// Process-wide cache of tag name -> tag type (0 general, 1 artist, 3 copyright,
+/// 4 character, 5 metadata). Populated lazily from the Gelbooru tag API.
+static TAG_TYPE_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+
+fn tag_type_cache() -> &'static Mutex<HashMap<String, i64>> {
+    TAG_TYPE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Fetch tag types for `tags`, using the cache and filling gaps via one API call.
+async fn fetch_tag_types(client: &Option<GelbooruClient>, tags: &[String]) -> HashMap<String, i64> {
+    // Start from cache.
+    let mut result: HashMap<String, i64> = HashMap::new();
+    let mut missing: Vec<String> = Vec::new();
+    {
+        let cache = tag_type_cache().lock().unwrap_or_else(|e| e.into_inner());
+        for t in tags {
+            if let Some(ty) = cache.get(t) {
+                result.insert(t.clone(), *ty);
+            } else {
+                missing.push(t.clone());
+            }
+        }
+    }
+    if missing.is_empty() || client.is_none() {
+        return result;
+    }
+    if let Some(client) = client {
+        if let Ok(fetched) = client.tags_by_names(&missing).await {
+            let mut cache = tag_type_cache().lock().unwrap_or_else(|e| e.into_inner());
+            for (name, ty) in fetched {
+                cache.insert(name.clone(), ty);
+                result.insert(name, ty);
+            }
+        }
+    }
+    // Any still-missing default to general (0).
+    for t in &missing {
+        result.entry(t.clone()).or_insert(0);
+    }
+    result
+}
+
 pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerRequest) {
     let ViewerRequest {
         posts,
@@ -199,6 +241,9 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
     'gallery: loop {
         let post = &all_posts[index];
         let tag_count = post.tags.split_whitespace().count();
+        // Fetch tag types (artist/character/series) for this post, cached.
+        let tag_names: Vec<String> = post.tag_list();
+        let _ = fetch_tag_types(&client, &tag_names).await;
         let mut tag_state = TagState::default();
         let mut phase;
         #[allow(unused_assignments)]
@@ -970,6 +1015,16 @@ fn draw_details_and_tags(
     tags_area: Rect,
     tags: &mut TagState,
 ) {
+    // Resolve tag types from the process-wide cache (populated by the gallery
+    // loop). Empty cache falls back to the `artist:` prefix heuristic.
+    let tag_types: HashMap<String, i64> = {
+        let cache = tag_type_cache().lock().unwrap_or_else(|e| e.into_inner());
+        post.tag_list()
+            .into_iter()
+            .map(|t| (t.clone(), cache.get(&t).copied().unwrap_or(0)))
+            .collect()
+    };
+
     // Details
     let details_block = Block::default()
         .borders(Borders::ALL)
@@ -985,7 +1040,7 @@ fn draw_details_and_tags(
     f.render_widget(details_block, details_area);
     if details_inner.width > 0 && details_inner.height > 0 {
         f.render_widget(
-            Paragraph::new(detail_lines(post, details_inner.width)),
+            Paragraph::new(detail_lines(post, details_inner.width, &tag_types)),
             details_inner,
         );
     }
@@ -1111,19 +1166,43 @@ fn centered_message(f: &mut ratatui::Frame, area: Rect, lines: Vec<Line<'static>
 // Details / tags
 // ---------------------------------------------------------------------------
 
-fn detail_lines(post: &Post, width: u16) -> Vec<Line<'static>> {
+fn detail_lines(post: &Post, width: u16, tag_types: &HashMap<String, i64>) -> Vec<Line<'static>> {
     let avail = width.saturating_sub(11).max(1) as usize;
 
-    let artists: Vec<String> = post
-        .tag_list()
-        .into_iter()
-        .filter(|t| t.starts_with("artist:"))
-        .map(|t| t.trim_start_matches("artist:").to_string())
-        .collect();
+    let mut artists: Vec<String> = Vec::new();
+    let mut characters: Vec<String> = Vec::new();
+    let mut series: Vec<String> = Vec::new();
+    for t in post.tag_list() {
+        let ty = tag_types.get(&t).copied().unwrap_or(0);
+        match ty {
+            1 => artists.push(t),
+            4 => characters.push(t),
+            3 => series.push(t),
+            _ => {}
+        }
+    }
+    if artists.is_empty() && tag_types.is_empty() {
+        artists = post
+            .tag_list()
+            .into_iter()
+            .filter(|t| t.starts_with("artist:"))
+            .map(|t| t.trim_start_matches("artist:").to_string())
+            .collect();
+    }
     let artist = if artists.is_empty() {
         "-".to_string()
     } else {
         artists.join(", ")
+    };
+    let character = if characters.is_empty() {
+        "-".to_string()
+    } else {
+        characters.join(", ")
+    };
+    let series_text = if series.is_empty() {
+        "-".to_string()
+    } else {
+        series.join(", ")
     };
 
     let source = if post.source.trim().is_empty() {
@@ -1163,6 +1242,16 @@ fn detail_lines(post: &Post, width: u16) -> Vec<Line<'static>> {
             "Artist",
             truncate_chars(&artist, avail),
             if artists.is_empty() { MUTED } else { VALUE },
+        ),
+        row(
+            "Character",
+            truncate_chars(&character, avail),
+            if characters.is_empty() { MUTED } else { VALUE },
+        ),
+        row(
+            "Series",
+            truncate_chars(&series_text, avail),
+            if series.is_empty() { MUTED } else { VALUE },
         ),
         row("Created", truncate_chars(&created, avail), MUTED),
     ];
@@ -1518,8 +1607,18 @@ fn ready_status(post: &Post, path: &Path) -> String {
     let ext = post.extension().to_ascii_lowercase();
     let is_video = matches!(
         ext.as_str(),
-        "mp4" | "webm" | "mkv" | "mov" | "avi" | "wmv" | "flv" | "m4v" | "mpg"
-            | "mpeg" | "ogv" | "ts"
+        "mp4"
+            | "webm"
+            | "mkv"
+            | "mov"
+            | "avi"
+            | "wmv"
+            | "flv"
+            | "m4v"
+            | "mpg"
+            | "mpeg"
+            | "ogv"
+            | "ts"
     );
     let suffix = if is_video { " (first frame)" } else { "" };
     format!(
@@ -1630,8 +1729,18 @@ fn place_image(post: &Post, path: &Path, rect: Rect) -> Result<(), String> {
     let ext = post.extension().to_ascii_lowercase();
     let is_video = matches!(
         ext.as_str(),
-        "mp4" | "webm" | "mkv" | "mov" | "avi" | "wmv" | "flv" | "m4v" | "mpg"
-            | "mpeg" | "ogv" | "ts"
+        "mp4"
+            | "webm"
+            | "mkv"
+            | "mov"
+            | "avi"
+            | "wmv"
+            | "flv"
+            | "m4v"
+            | "mpg"
+            | "mpeg"
+            | "ogv"
+            | "ts"
     );
     if is_video {
         cmd.arg("--loop").arg("0");

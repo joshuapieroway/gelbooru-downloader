@@ -146,22 +146,60 @@ impl GelbooruClient {
         Ok(posts)
     }
 
-    /// Autocomplete tags matching `prefix`, returning (name, post_count) pairs.
-    /// Results are returned in API order; callers should sort by count desc.
-    pub async fn tag_autocomplete(
-        &self,
-        prefix: &str,
-        limit: u32,
-    ) -> Result<Vec<(String, i64)>> {
+    /// Autocomplete tags matching `prefix`, using Gelbooru's `autocomplete2`
+    /// endpoint. Results come back sorted by post count (most first), exactly
+    /// like the website's search box, capped at 10.
+    pub async fn tag_autocomplete(&self, prefix: &str, _limit: u32) -> Result<Vec<(String, i64)>> {
         let url = format!("{}/index.php", self.base_url);
-        let limit_s = limit.clamp(1, 500).to_string();
-        let pattern = format!("{}%", prefix);
+        let mut req = self.http.get(&url).query(&[
+            ("page", "autocomplete2"),
+            ("term", prefix),
+            ("type", "tag_query"),
+            ("limit", "10"),
+        ]);
+        req = self.apply_auth(req);
+        let resp = self.send_with_retry(req).await?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Http(e.to_string()))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| AppError::Api(format!("json parse: {}", e)))?;
+        let mut out = Vec::new();
+        if let Some(arr) = v.as_array() {
+            for item in arr {
+                let value = item
+                    .get("value")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let count = item
+                    .get("post_count")
+                    .and_then(|c| c.as_str())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .or_else(|| item.get("post_count").and_then(|c| c.as_i64()))
+                    .unwrap_or(0);
+                if !value.is_empty() {
+                    out.push((value, count));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch tag metadata (name -> type) for the given tag names in one request.
+    pub async fn tags_by_names(&self, names: &[String]) -> Result<Vec<(String, i64)>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = format!("{}/index.php", self.base_url);
+        let joined = names.join(" ");
         let mut req = self.http.get(&url).query(&[
             ("page", "dapi"),
             ("s", "tag"),
             ("q", "index"),
-            ("name_pattern", &pattern),
-            ("limit", &limit_s),
+            ("names", &joined),
+            ("limit", "1000"),
             ("json", "1"),
         ]);
         req = self.apply_auth(req);
@@ -180,14 +218,12 @@ impl GelbooruClient {
                     .and_then(|n| n.as_str())
                     .unwrap_or("")
                     .to_string();
-                let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
+                let ty = t.get("type").and_then(|c| c.as_i64()).unwrap_or(0);
                 if !name.is_empty() {
-                    out.push((name, count));
+                    out.push((name, ty));
                 }
             }
         }
-        // Sort by post count descending (most popular first), then name.
-        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         Ok(out)
     }
 
