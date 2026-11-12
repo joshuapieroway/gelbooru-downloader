@@ -61,15 +61,15 @@ jobs:
           VERSION=$(grep '^version =' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Generate checksums
-        run: |
-          sha256sum target/release/gelbooru > gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256
-          echo "Checksums: $(cat gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256)"
-
       - name: Create tarball
         run: |
           tar -czvf gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz -C target/release gelbooru
           ls -lh gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz
+
+      - name: Generate checksums
+        run: |
+          sha256sum gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.tar.gz > gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256
+          echo "Checksums: $(cat gelbooru-downloader-${{ steps.artifact_version.outputs.version }}-linux-x86_64.sha256)" 
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -87,6 +87,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
 
     outputs:
       version: ${{ steps.extract_version.outputs.version }}
@@ -122,7 +124,7 @@ jobs:
           files: |
             gelbooru-downloader-${{ steps.extract_version.outputs.version }}-linux-x86_64.tar.gz
             gelbooru-downloader-${{ steps.extract_version.outputs.version }}-linux-x86_64.sha256
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           prerelease: false
         env:
