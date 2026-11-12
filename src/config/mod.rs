@@ -98,6 +98,10 @@ pub struct SearchConfig {
     pub default_limit: u32,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
+    /// Columns shown in the TUI search results, in order. Valid values:
+    /// id, rating, score, size, character, series, tags, date.
+    #[serde(default = "default_search_columns")]
+    pub columns: Vec<String>,
 }
 
 fn default_rating() -> String {
@@ -110,12 +114,23 @@ fn default_page_size() -> u32 {
     100
 }
 
+fn default_search_columns() -> Vec<String> {
+    vec![
+        "rating".to_string(),
+        "score".to_string(),
+        "character".to_string(),
+        "series".to_string(),
+        "tags".to_string(),
+    ]
+}
+
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             default_rating: default_rating(),
             default_limit: default_limit(),
             page_size: default_page_size(),
+            columns: default_search_columns(),
         }
     }
 }
@@ -208,6 +223,35 @@ impl Config {
 
     pub fn download_dir(&self) -> PathBuf {
         crate::utils::paths::expand_tilde(&self.downloads.directory)
+    }
+
+    /// Validated list of search result columns, in display order.
+    pub fn search_columns(&self) -> Vec<String> {
+        const VALID: &[&str] = &[
+            "id",
+            "rating",
+            "score",
+            "size",
+            "character",
+            "series",
+            "tags",
+            "date",
+        ];
+        let mut out: Vec<String> = self
+            .search
+            .columns
+            .iter()
+            .map(|c| c.trim().to_ascii_lowercase())
+            .filter(|c| VALID.contains(&c.as_str()))
+            .collect();
+        // de-dup
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|c| seen.insert(c.clone()));
+        if out.is_empty() {
+            default_search_columns()
+        } else {
+            out
+        }
     }
 
     pub fn quick_download_dir(&self) -> PathBuf {

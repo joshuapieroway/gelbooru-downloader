@@ -110,6 +110,8 @@ struct AppState {
     search_page: usize,
     search_per_page: usize,
     search_total: i64,
+    /// Columns to display in the search results, in order.
+    search_columns: Vec<String>,
     /// Autocomplete suggestions for the current search input (tag, post count).
     suggestions: Vec<(String, i64)>,
     /// Currently highlighted suggestion index.
@@ -136,7 +138,11 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(db: Option<Arc<HistoryDb>>, client: Option<GelbooruClient>) -> Self {
+    fn new(
+        db: Option<Arc<HistoryDb>>,
+        client: Option<GelbooruClient>,
+        columns: Vec<String>,
+    ) -> Self {
         Self {
             tab: 0,
             mode: Mode::Normal,
@@ -156,6 +162,17 @@ impl AppState {
             search_page: 1,
             search_per_page: 50,
             search_total: 0,
+            search_columns: if columns.is_empty() {
+                vec![
+                    "rating".into(),
+                    "score".into(),
+                    "character".into(),
+                    "series".into(),
+                    "tags".into(),
+                ]
+            } else {
+                columns
+            },
             suggestions: Vec::new(),
             suggestion_selected: None,
             suggest_scroll: 0,
@@ -834,7 +851,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
             }
         });
     }
-    let state = Arc::new(Mutex::new(AppState::new(db, client)));
+    let state = Arc::new(Mutex::new(AppState::new(db, client, cfg.search_columns())));
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1023,6 +1040,34 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
     f.render_widget(footer, chunks[3]);
 }
 
+fn search_col_weight(col: &str) -> u32 {
+    match col {
+        "id" => 8,
+        "rating" => 12,
+        "score" => 7,
+        "size" => 12,
+        "character" => 18,
+        "series" => 18,
+        "tags" => 25,
+        "date" => 14,
+        _ => 10,
+    }
+}
+
+fn search_cell(post: &Post, col: &str) -> (String, Option<Color>) {
+    match col {
+        "id" => (post.id.to_string(), None),
+        "rating" => (post.rating.clone(), Some(rating_color(&post.rating))),
+        "score" => (post.score.to_string(), None),
+        "size" => (format!("{}x{}", post.width, post.height), None),
+        "character" => (first_tag_of_type(post, 4), None),
+        "series" => (first_tag_of_type(post, 3), None),
+        "tags" => (truncate_chars(&post.tags, 60), None),
+        "date" => (post.created_at.clone(), None),
+        _ => (String::new(), None),
+    }
+}
+
 fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let sug_height = if app.mode == Mode::SearchInput {
         10u16
@@ -1038,45 +1083,63 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         ])
         .split(area);
 
-    let header = ["Rating", "Score", "Character", "Series", "Tags"];
-    let widths = [
-        Constraint::Percentage(16),
-        Constraint::Percentage(7),
-        Constraint::Percentage(20),
-        Constraint::Percentage(20),
-        Constraint::Percentage(37),
-    ];
+    let cols = if app.search_columns.is_empty() {
+        vec![
+            "rating".to_string(),
+            "score".to_string(),
+            "character".to_string(),
+            "series".to_string(),
+            "tags".to_string(),
+        ]
+    } else {
+        app.search_columns.clone()
+    };
+    let ncols = cols.len().max(1);
+
+    // Compute percentage widths from weights.
+    let total_w: u32 = cols.iter().map(|c| search_col_weight(c)).sum();
+    let widths: Vec<Constraint> = cols
+        .iter()
+        .map(|c| Constraint::Percentage((search_col_weight(c) * 100 / total_w.max(1)) as u16))
+        .collect();
+
+    let header: Vec<&str> = cols
+        .iter()
+        .map(|c| match c.as_str() {
+            "id" => "ID",
+            "rating" => "Rating",
+            "score" => "Score",
+            "size" => "Size",
+            "character" => "Character",
+            "series" => "Series",
+            "tags" => "Tags",
+            "date" => "Date",
+            _ => "",
+        })
+        .collect();
+
     let selected = if app.results.is_empty() {
         None
     } else {
-        Some(app.scroll.min(app.results.len() - 1))
+        Some(app.scroll.min(app.results.len().saturating_sub(1)))
     };
 
     let rows: Vec<Row> = if app.searching {
-        vec![Row::new(vec![
-            Cell::from("Searching...").style(Style::default().fg(C_WARN)),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])]
+        let mut cells = vec![Cell::from("Searching...").style(Style::default().fg(C_WARN))];
+        cells.resize(ncols, Cell::from(""));
+        vec![Row::new(cells)]
     } else if let Some(err) = &app.search_error {
-        vec![Row::new(vec![
-            Cell::from(format!("Error: {}", err)).style(Style::default().fg(C_ERROR)),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])]
+        let mut cells =
+            vec![Cell::from(format!("Error: {}", err)).style(Style::default().fg(C_ERROR))];
+        cells.resize(ncols, Cell::from(""));
+        vec![Row::new(cells)]
     } else if app.results.is_empty() {
-        vec![Row::new(vec![
+        let mut cells = vec![
             Cell::from("No results. Press / to type a query, then Enter to search.")
                 .style(Style::default().fg(C_MUTED)),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])]
+        ];
+        cells.resize(ncols, Cell::from(""));
+        vec![Row::new(cells)]
     } else {
         app.results
             .iter()
@@ -1092,21 +1155,23 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 } else {
                     Style::default()
                 };
-                Row::new(vec![
-                    Cell::from(p.rating.clone())
-                        .style(Style::default().fg(rating_color(&p.rating))),
-                    Cell::from(p.score.to_string()),
-                    Cell::from(truncate_chars(&first_tag_of_type(p, 4), 28)),
-                    Cell::from(truncate_chars(&first_tag_of_type(p, 3), 28)),
-                    Cell::from(truncate_chars(&p.tags, 60)),
-                ])
-                .style(style)
+                let cells: Vec<Cell> = cols
+                    .iter()
+                    .map(|c| {
+                        let (val, color) = search_cell(p, c);
+                        let mut cell = Cell::from(val);
+                        if let Some(col) = color {
+                            cell = cell.style(Style::default().fg(col));
+                        }
+                        cell
+                    })
+                    .collect();
+                Row::new(cells).style(style)
             })
             .collect()
     };
 
-    let table = Table::new(rows, widths)
-        .column_spacing(0)
+    let table = Table::new(rows, &widths)
         .header(Row::new(
             header
                 .iter()
@@ -1115,6 +1180,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 })
                 .collect::<Vec<_>>(),
         ))
+        .column_spacing(0)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1167,6 +1233,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             .title("Search")
             .border_style(Style::default().fg(C_MUTED)),
     );
+
     // Autocomplete suggestions panel (only meaningful in search-input mode).
     if app.mode == Mode::SearchInput && chunks[1].height > 0 {
         let visible = chunks[1].height.saturating_sub(2) as usize; // borders
@@ -1530,7 +1597,7 @@ mod tests {
 
     #[test]
     fn same_tag_with_different_ratings_stays_separate_in_queue() {
-        let mut app = AppState::new(None, None);
+        let mut app = AppState::new(None, None, Vec::new());
         app.update_jobs(
             vec![
                 snapshot("a", "general,sensitive", "/out/safe", 10, 2, 100),
@@ -1553,7 +1620,7 @@ mod tests {
 
     #[test]
     fn same_tag_and_rating_with_different_outputs_stays_separate_in_queue() {
-        let mut app = AppState::new(None, None);
+        let mut app = AppState::new(None, None, Vec::new());
         app.update_jobs(
             vec![
                 snapshot("a", "general", "/out/safe", 10, 1, 0),
@@ -1571,7 +1638,7 @@ mod tests {
 
     #[test]
     fn per_job_speed_and_eta_come_from_the_previous_poll() {
-        let mut app = AppState::new(None, None);
+        let mut app = AppState::new(None, None, Vec::new());
         let start = Instant::now();
         app.update_jobs(vec![snapshot("a", "general", "/out", 10, 0, 0)], start);
 
@@ -1590,7 +1657,7 @@ mod tests {
 
     #[test]
     fn finished_jobs_are_removed_from_the_queue() {
-        let mut app = AppState::new(None, None);
+        let mut app = AppState::new(None, None, Vec::new());
         let now = Instant::now();
         app.update_jobs(
             vec![
@@ -1627,7 +1694,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = AppState::new(None, None);
+        let mut app = AppState::new(None, None, Vec::new());
         app.update_jobs(
             vec![
                 snapshot("a", "general,sensitive", "/out/safe", 10, 2, 100),
@@ -1664,7 +1731,7 @@ mod tests {
 
     #[test]
     fn search_scroll_cannot_pass_the_last_result() {
-        let mut app = AppState::new(None, None);
+        let mut app = AppState::new(None, None, Vec::new());
         app.results = vec![Post::default(), Post::default(), Post::default()];
         app.scroll = 99;
 
@@ -1675,7 +1742,7 @@ mod tests {
 
     #[test]
     fn search_scroll_is_zero_when_there_are_no_results() {
-        let mut app = AppState::new(None, None);
+        let mut app = AppState::new(None, None, Vec::new());
         app.scroll = 7;
 
         app.clamp_search_scroll();

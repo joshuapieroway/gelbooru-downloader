@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.10] - 2026-11-12
+
+Patch release: configurable search result columns.
+
+### Added
+
+- `[search] columns` config option (list of column names) controls which
+  columns appear in the TUI search results and in what order. Valid values:
+  `id`, `rating`, `score`, `size`, `character`, `series`, `tags`, `date`.
+  Defaults to `["rating", "score", "character", "series", "tags"]`.
+
 ## [0.6.9] - 2026-11-12
 
 Patch release: single character/series per search row.
