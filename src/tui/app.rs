@@ -863,7 +863,15 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                         UiAction::Search(page) => begin_search(&state, page),
                         UiAction::Suggest(prefix) => begin_suggest(&state, prefix),
                         UiAction::View(req) => {
-                            crate::tui::viewer::show(&mut terminal, &cfg, req).await;
+                            if let Some(tag) =
+                                crate::tui::viewer::show(&mut terminal, &cfg, req).await
+                            {
+                                let mut st = safe_lock(state.as_ref());
+                                st.query = tag;
+                                st.mode = Mode::Normal;
+                                drop(st);
+                                begin_search(&state, 1);
+                            }
                         }
                         UiAction::None => {}
                     }

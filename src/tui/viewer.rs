@@ -190,7 +190,11 @@ async fn fetch_tag_types(client: &Option<GelbooruClient>, tags: &[String]) -> Ha
     result
 }
 
-pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerRequest) {
+pub async fn show(
+    terminal: &mut TuiTerminal,
+    cfg: &Config,
+    request: ViewerRequest,
+) -> Option<String> {
     let ViewerRequest {
         posts,
         start,
@@ -202,7 +206,7 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
         total: search_total,
     } = request;
     if posts.is_empty() {
-        return;
+        return None;
     }
 
     let mut index = start.min(posts.len() - 1);
@@ -370,14 +374,14 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                     Err(_) => {
                         clear_images();
                         terminal.clear().ok();
-                        return;
+                        return None;
                     }
                 },
                 Ok(false) => None,
                 Err(_) => {
                     clear_images();
                     terminal.clear().ok();
-                    return;
+                    return None;
                 }
             };
 
@@ -420,13 +424,20 @@ pub async fn show(terminal: &mut TuiTerminal, cfg: &Config, request: ViewerReque
                     {
                         clear_images();
                         terminal.clear().ok();
-                        return;
+                        return None;
                     }
                     match k.code {
-                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                        KeyCode::Esc | KeyCode::Char('q') => {
                             clear_images();
                             terminal.clear().ok();
-                            return;
+                            return None;
+                        }
+                        KeyCode::Enter => {
+                            let selected_tag =
+                                all_posts[index].tag_list().get(tag_state.selected).cloned();
+                            clear_images();
+                            terminal.clear().ok();
+                            return selected_tag;
                         }
                         KeyCode::Left | KeyCode::Char('h') => {
                             if index > 0 {
