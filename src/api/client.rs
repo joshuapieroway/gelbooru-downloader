@@ -226,6 +226,52 @@ impl GelbooruClient {
             }
         }
 
+        // 3. Exact-match lookup: catches tags filtered out of both autocomplete
+        //    and prefix search (e.g. "loli", "gore"). Only adds the tag when
+        //    the typed prefix is the full tag name.
+        let exact_url = format!("{}/index.php", self.base_url);
+        let mut req = self.http.get(&exact_url).query(&[
+            ("page", "dapi"),
+            ("s", "tag"),
+            ("q", "index"),
+            ("name", prefix),
+            ("json", "1"),
+        ]);
+        req = self.apply_auth(req);
+        if let Ok(resp) = self.send_with_retry(req).await {
+            if let Ok(text) = resp.text().await {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
+                        for t in arr {
+                            let name = t
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
+                            if !name.is_empty() {
+                                merged
+                                    .entry(name)
+                                    .and_modify(|c| *c = (*c).max(count))
+                                    .or_insert(count);
+                            }
+                        }
+                    } else if let Some(t) = v.get("tag") {
+                        // Single object (not array).
+                        if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
+                            let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
+                            if !name.is_empty() {
+                                merged
+                                    .entry(name.to_string())
+                                    .and_modify(|c| *c = (*c).max(count))
+                                    .or_insert(count);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Sort by post count descending, then name.
         let mut out: Vec<(String, i64)> = merged.into_iter().collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

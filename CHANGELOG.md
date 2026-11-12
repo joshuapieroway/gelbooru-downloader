@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-11-12
+
+Patch release: exact-match fallback for tags filtered from autocomplete.
+
+### Fixed
+
+- Tags that Gelbooru filters from autocomplete/prefix search (e.g. "loli",
+  "gore") now appear in TUI suggestions when the full tag name is typed,
+  via an exact-match DAPI lookup.
+
 ## [0.6.2] - 2026-11-12
 
 Compare: [`v0.6.1...v0.6.2`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.6.1...v0.6.2)
