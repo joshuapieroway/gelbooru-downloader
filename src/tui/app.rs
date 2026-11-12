@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::database::history::HistoryDb;
 use crate::downloader::engine::human_bytes;
 use crate::downloader::progress::{self, ProgressSnapshot};
+use crate::utils::paths;
 use crate::utils::truncate_chars;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::execute;
@@ -36,6 +37,18 @@ fn safe_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 const TABS: &[&str] = &["Search", "Queue", "History", "Stats"];
 
+// Centralized palette so the TUI keeps a consistent look. Tweak these
+// values to re-theme the whole interface.
+const C_ACCENT: Color = Color::Cyan;
+const C_MUTED: Color = Color::DarkGray;
+const C_TEXT: Color = Color::Gray;
+const C_WARN: Color = Color::Yellow;
+const C_ERROR: Color = Color::Red;
+const C_OK: Color = Color::Green;
+const C_SEL_BG: Color = Color::Rgb(60, 60, 90);
+const C_ALT_BG: Color = Color::Rgb(24, 24, 32);
+const C_SPEED: Color = Color::Magenta;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
@@ -63,6 +76,8 @@ struct AppState {
     tab: usize,
     mode: Mode,
     query: String,
+    search_history: Vec<String>,
+    history_index: Option<usize>,
     scroll: usize,
     tick: u64,
     db: Option<Arc<HistoryDb>>,
@@ -76,6 +91,18 @@ struct AppState {
     search_page: usize,
     search_per_page: usize,
     search_total: i64,
+    /// Autocomplete suggestions for the current search input (tag, post count).
+    suggestions: Vec<(String, i64)>,
+    /// Currently highlighted suggestion index.
+    suggestion_selected: Option<usize>,
+    /// Scroll offset into the suggestions list.
+    suggest_scroll: usize,
+    /// Whether a suggestion fetch is in flight.
+    suggesting: bool,
+    /// Set when the query changed and suggestions need refreshing.
+    suggest_dirty: bool,
+    /// Monotonic id for the latest suggestion request.
+    suggest_seq: u64,
     /// Monotonic id for the latest search request. Out-of-order responses are
     /// ignored so a slow first page cannot overwrite a newer page or query.
     search_seq: u64,
@@ -95,6 +122,8 @@ impl AppState {
             tab: 0,
             mode: Mode::Normal,
             query: String::new(),
+            search_history: load_search_history(),
+            history_index: None,
             scroll: 0,
             tick: 0,
             db,
@@ -108,6 +137,12 @@ impl AppState {
             search_page: 1,
             search_per_page: 50,
             search_total: 0,
+            suggestions: Vec::new(),
+            suggestion_selected: None,
+            suggest_scroll: 0,
+            suggesting: false,
+            suggest_dirty: false,
+            suggest_seq: 0,
             search_seq: 0,
             jobs: Vec::new(),
             prog_bytes: 0,
@@ -262,7 +297,12 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
         st.searching = false;
         match result {
             Ok((posts, total)) => {
-                st.results = posts;
+                // mp4 files are never shown in the TUI list, but remain
+                // downloadable through the CLI (`gelbooru download`).
+                st.results = posts
+                    .into_iter()
+                    .filter(|p| p.extension().to_ascii_lowercase() != "mp4")
+                    .collect();
                 st.search_total = total;
                 st.search_page = page;
                 st.clamp_search_scroll();
@@ -285,34 +325,323 @@ fn total_search_pages(total: i64, per_page: usize) -> usize {
     ((total.max(0) as usize + per_page.max(1) - 1) / per_page.max(1)).max(1)
 }
 
+/// Extract the last whitespace-delimited token of a query (the one being typed).
+fn last_query_token(q: &str) -> String {
+    q.split_whitespace().last().unwrap_or("").to_string()
+}
+
+const MAX_SEARCH_HISTORY: usize = 100;
+
+fn search_history_path() -> std::path::PathBuf {
+    paths::data_dir().join("search_history.txt")
+}
+
+fn load_search_history() -> Vec<String> {
+    std::fs::read_to_string(search_history_path())
+        .ok()
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn persist_search_history(history: &[String]) {
+    let path = search_history_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let trimmed: Vec<&String> = history.iter().rev().take(MAX_SEARCH_HISTORY).rev().collect();
+    let content = trimmed
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = std::fs::write(&path, content);
+}
+
+/// Start (or restart) an autocomplete request for `prefix`. Stale responses are
+/// ignored via a sequence number, mirroring `begin_search`.
+fn begin_suggest(state: &Arc<Mutex<AppState>>, prefix: String) {
+    if prefix.is_empty() {
+        let mut st = safe_lock(&state);
+        st.suggestions.clear();
+        st.suggestion_selected = None;
+        st.suggest_scroll = 0;
+        st.suggesting = false;
+        return;
+    }
+    let (client, seq) = {
+        let mut st = safe_lock(&state);
+        st.suggest_seq = st.suggest_seq.wrapping_add(1);
+        st.suggesting = true;
+        st.suggestions.clear();
+        st.suggestion_selected = None;
+        st.suggest_scroll = 0;
+        (st.client.clone(), st.suggest_seq)
+    };
+
+    let Some(client) = client else {
+        let mut st = safe_lock(&state);
+        if st.suggest_seq == seq {
+            st.suggesting = false;
+        }
+        return;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let result = client.tag_autocomplete(&prefix, 200).await;
+        let mut st = safe_lock(&state);
+        if st.suggest_seq != seq {
+            return;
+        }
+        st.suggesting = false;
+        match result {
+            Ok(tags) => {
+                st.suggestions = tags;
+                if !st.suggestions.is_empty() {
+                    st.suggestion_selected = Some(0);
+                }
+            }
+            Err(_) => {
+                st.suggestions.clear();
+                st.suggestion_selected = None;
+            }
+        }
+    });
+}
+
 /// Work that must happen after the state mutex is released.
 enum UiAction {
     None,
     Quit,
     Search(usize),
+    Suggest(String),
     View(crate::tui::viewer::ViewerRequest),
 }
 
 /// Apply a key press to the UI state. Any network work is returned as an
 /// action so the caller can await it without holding the state mutex.
-fn handle_key(st: &mut AppState, code: KeyCode) -> UiAction {
+fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAction {
     match st.mode {
         Mode::SearchInput => {
             match code {
-                KeyCode::Esc => st.mode = Mode::Normal,
+                KeyCode::Esc => {
+                    st.mode = Mode::Normal;
+                    st.suggestions.clear();
+                    st.suggestion_selected = None;
+                    st.suggest_dirty = false;
+                    st.suggesting = false;
+                    st.suggest_seq = st.suggest_seq.wrapping_add(1);
+                }
                 KeyCode::Enter => {
+                    // Accept a highlighted suggestion first if any, then search.
+                    if let Some(i) = st.suggestion_selected {
+                        if let Some((tag, _)) = st.suggestions.get(i).cloned() {
+                            // Replace last token with the chosen tag.
+                            let mut parts: Vec<&str> = st.query.split_whitespace().collect();
+                            if !parts.is_empty() {
+                                parts.pop();
+                            }
+                            let mut newq = parts.join(" ");
+                            if !newq.is_empty() {
+                                newq.push(' ');
+                            }
+                            newq.push_str(&tag);
+                            newq.push(' ');
+                            st.query = newq;
+                        }
+                    }
+                    st.suggestions.clear();
+                    st.suggestion_selected = None;
+                    st.suggest_dirty = false;
+                    st.suggesting = false;
+                    st.suggest_seq = st.suggest_seq.wrapping_add(1);
+                    // Record in search history (dedup consecutive duplicates).
+                    let q = st.query.trim().to_string();
+                    if !q.is_empty() {
+                        if st.search_history.last().map(|x| x.as_str()) != Some(q.as_str()) {
+                            st.search_history.push(q.clone());
+                        }
+                        // Cap size.
+                        if st.search_history.len() > MAX_SEARCH_HISTORY {
+                            let excess = st.search_history.len() - MAX_SEARCH_HISTORY;
+                            st.search_history.drain(0..excess);
+                        }
+                        persist_search_history(&st.search_history);
+                    }
                     st.mode = Mode::Normal;
                     if !st.query.trim().is_empty() {
                         return UiAction::Search(1);
                     }
                 }
-                KeyCode::Backspace => {
-                    st.query.pop();
+                KeyCode::Tab => {
+                    if let Some(i) = st.suggestion_selected {
+                        if let Some((tag, _)) = st.suggestions.get(i).cloned() {
+                            let mut parts: Vec<&str> = st.query.split_whitespace().collect();
+                            if !parts.is_empty() && !st.query.ends_with(char::is_whitespace) {
+                                parts.pop();
+                            }
+                            let mut newq = parts.join(" ");
+                            if !newq.is_empty() {
+                                newq.push(' ');
+                            }
+                            newq.push_str(&tag);
+                            newq.push(' ');
+                            st.query = newq;
+                        }
+                    }
+                    st.suggestions.clear();
+                    st.suggestion_selected = None;
+                    st.suggest_scroll = 0;
+                    st.suggest_dirty = false;
+                    st.suggesting = false;
+                    st.suggest_seq = st.suggest_seq.wrapping_add(1);
                 }
-                KeyCode::Char(c) => st.query.push(c),
+                KeyCode::Backspace => {
+                    if modifiers.contains(KeyModifiers::CONTROL) {
+                        // Delete the previous word.
+                        while st.query.ends_with(char::is_whitespace) {
+                            st.query.pop();
+                        }
+                        while st.query.ends_with(|c: char| !c.is_whitespace()) {
+                            st.query.pop();
+                        }
+                    } else {
+                        st.query.pop();
+                    }
+                    st.history_index = None;
+                    st.suggest_dirty = true;
+                }
+                KeyCode::Up => {
+                    if modifiers.contains(KeyModifiers::CONTROL) {
+                        if !st.suggestions.is_empty() {
+                            let i = st.suggestion_selected.unwrap_or(0);
+                            let newi = i.saturating_sub(1);
+                            st.suggestion_selected = Some(newi);
+                            if newi < st.suggest_scroll {
+                                st.suggest_scroll = newi;
+                            }
+                        }
+                    } else if !st.suggestions.is_empty() {
+                        // Navigate suggestions.
+                        let i = st.suggestion_selected.unwrap_or(0);
+                        let newi = i.saturating_sub(1);
+                        st.suggestion_selected = Some(newi);
+                        if newi < st.suggest_scroll {
+                            st.suggest_scroll = newi;
+                        }
+                    } else if !st.search_history.is_empty() {
+                        // Recall previous search (terminal-style history).
+                        let idx = match st.history_index {
+                            None => st.search_history.len().saturating_sub(1),
+                            Some(i) if i > 0 => i - 1,
+                            Some(i) => i,
+                        };
+                        st.history_index = Some(idx);
+                        st.query = st.search_history[idx].clone();
+                        st.suggestions.clear();
+                        st.suggestion_selected = None;
+                        st.suggest_scroll = 0;
+                        st.suggest_dirty = false;
+                        st.suggesting = false;
+                        // Invalidate any in-flight fetch so it cannot repopulate.
+                        st.suggest_seq = st.suggest_seq.wrapping_add(1);
+                    }
+                }
+                KeyCode::Down => {
+                    if modifiers.contains(KeyModifiers::CONTROL) {
+                        if !st.suggestions.is_empty() {
+                            let i = st.suggestion_selected.unwrap_or(0);
+                            let newi = (i + 1).min(st.suggestions.len().saturating_sub(1));
+                            st.suggestion_selected = Some(newi);
+                            let visible = 8usize;
+                            if newi >= st.suggest_scroll + visible {
+                                st.suggest_scroll = newi + 1 - visible;
+                            }
+                        }
+                    } else if !st.suggestions.is_empty() {
+                        let i = st.suggestion_selected.unwrap_or(0);
+                        let newi = (i + 1).min(st.suggestions.len().saturating_sub(1));
+                        st.suggestion_selected = Some(newi);
+                        let visible = 8usize;
+                        if newi >= st.suggest_scroll + visible {
+                            st.suggest_scroll = newi + 1 - visible;
+                        }
+                    } else {
+                        match st.history_index {
+                            Some(i) if i + 1 < st.search_history.len() => {
+                                let ni = i + 1;
+                                st.history_index = Some(ni);
+                                st.query = st.search_history[ni].clone();
+                            }
+                            Some(_) => {
+                                st.history_index = None;
+                                st.query.clear();
+                            }
+                            None => {}
+                        }
+                        st.suggestions.clear();
+                        st.suggestion_selected = None;
+                        st.suggest_scroll = 0;
+                        st.suggest_dirty = false;
+                        st.suggesting = false;
+                        st.suggest_seq = st.suggest_seq.wrapping_add(1);
+                    }
+                }
+                KeyCode::Char(c) => {
+                    // Ctrl+Backspace often arrives as Ctrl+H (or Ctrl+?).
+                    if modifiers.contains(KeyModifiers::CONTROL) {
+                        if c == 'h' || c == 'H' || c == 'w' || c == 'W' {
+                            // Delete previous word.
+                            while st.query.ends_with(char::is_whitespace) {
+                                st.query.pop();
+                            }
+                            while st.query.ends_with(|ch: char| !ch.is_whitespace()) {
+                                st.query.pop();
+                            }
+                            st.history_index = None;
+                            st.suggest_dirty = true;
+                        }
+                        // Otherwise ignore control-modified characters.
+                        return UiAction::None;
+                    }
+                    st.query.push(c);
+                    st.history_index = None;
+                    st.suggest_dirty = true;
+                }
+                KeyCode::PageUp => {
+                    if !st.suggestions.is_empty() {
+                        let i = st.suggestion_selected.unwrap_or(0);
+                        let newi = i.saturating_sub(8);
+                        st.suggestion_selected = Some(newi);
+                        if newi < st.suggest_scroll {
+                            st.suggest_scroll = newi;
+                        }
+                    }
+                }
+                KeyCode::PageDown => {
+                    if !st.suggestions.is_empty() {
+                        let i = st.suggestion_selected.unwrap_or(0);
+                        let newi = (i + 8).min(st.suggestions.len().saturating_sub(1));
+                        st.suggestion_selected = Some(newi);
+                        let visible = 8usize;
+                        if newi >= st.suggest_scroll + visible {
+                            st.suggest_scroll = newi + 1 - visible;
+                        }
+                    }
+                }
                 _ => {}
             }
-            UiAction::None
+            if st.suggest_dirty {
+                st.suggest_dirty = false;
+                UiAction::Suggest(last_query_token(&st.query))
+            } else {
+                UiAction::None
+            }
         }
         Mode::Normal => match code {
             KeyCode::Char('q') | KeyCode::Esc => UiAction::Quit,
@@ -522,11 +851,12 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
                     }
                     let action = {
                         let mut st = safe_lock(&state);
-                        handle_key(&mut st, k.code)
+                        handle_key(&mut st, k.code, k.modifiers)
                     };
                     match action {
                         UiAction::Quit => return Ok(()),
                         UiAction::Search(page) => begin_search(&state, page),
+                        UiAction::Suggest(prefix) => begin_suggest(&state, prefix),
                         UiAction::View(req) => {
                             crate::tui::viewer::show(&mut terminal, &cfg, req).await;
                         }
@@ -570,25 +900,25 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
         Span::styled(
             "Gelbooru Downloader",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(C_ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
             concat!("v", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(C_MUTED),
         ),
         Span::raw("   "),
         Span::styled(
             "High-performance async image downloader",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(C_TEXT),
         ),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(C_MUTED)),
     );
     f.render_widget(header, chunks[0]);
 
@@ -598,14 +928,13 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title("Views")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(C_MUTED)),
         )
         .select(app.tab)
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default().fg(C_TEXT))
         .highlight_style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .add_modifier(Modifier::REVERSED)
                 .add_modifier(Modifier::BOLD),
         )
         .divider(Span::raw(" | "));
@@ -621,11 +950,15 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
 
     let help = match app.mode {
         Mode::Normal => {
-            "Tab/←/→ views  1-4 jump  ↑/↓ scroll  / search  n/p page  +/- size  v/Enter view  mouse wheel scroll  q quit"
+            if app.tab == 0 {
+                "Tab/←→ view  1-4 select  ↑↓ scroll  / search  v view  q quit"
+            } else {
+                "Tab/←→ view  1-4 select  q quit"
+            }
         }
-        Mode::SearchInput => "Type query  Enter search  Esc cancel",
+        Mode::SearchInput => "Type query  ↑↓ history  Tab accept  Enter search  Esc cancel",
     };
-    let footer = Paragraph::new(Span::styled(help, Style::default().fg(Color::DarkGray))).block(
+    let footer = Paragraph::new(Span::styled(help, Style::default().fg(C_MUTED))).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded),
@@ -634,9 +967,10 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
 }
 
 fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
+    let sug_height = if app.mode == Mode::SearchInput { 10u16 } else { 0u16 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .constraints([Constraint::Min(5), Constraint::Length(sug_height), Constraint::Length(3)])
         .split(area);
 
     let header = ["ID", "Rating", "Size", "Score", "Tags"];
@@ -655,7 +989,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
 
     let rows: Vec<Row> = if app.searching {
         vec![Row::new(vec![
-            Cell::from("Searching...").style(Style::default().fg(Color::Yellow)),
+            Cell::from("Searching...").style(Style::default().fg(C_WARN)),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -663,7 +997,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         ])]
     } else if let Some(err) = &app.search_error {
         vec![Row::new(vec![
-            Cell::from(format!("Error: {}", err)).style(Style::default().fg(Color::Red)),
+            Cell::from(format!("Error: {}", err)).style(Style::default().fg(C_ERROR)),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -671,8 +1005,8 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         ])]
     } else if app.results.is_empty() {
         vec![Row::new(vec![
-            Cell::from("No results. Press / to search.")
-                .style(Style::default().fg(Color::DarkGray)),
+            Cell::from("No results. Press / to type a query, then Enter to search.")
+                .style(Style::default().fg(C_MUTED)),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -685,10 +1019,11 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             .map(|(i, p)| {
                 let style = if Some(i) == selected {
                     Style::default()
-                        .bg(Color::Rgb(60, 60, 90))
+                        .fg(Color::White)
+                        .bg(C_SEL_BG)
                         .add_modifier(Modifier::BOLD)
                 } else if i % 2 == 0 {
-                    Style::default().bg(Color::Rgb(24, 24, 32))
+                    Style::default().bg(C_ALT_BG)
                 } else {
                     Style::default()
                 };
@@ -712,7 +1047,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .map(|h| {
                     Cell::from(*h).style(
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(C_ACCENT)
                             .add_modifier(Modifier::BOLD),
                     )
                 })
@@ -729,7 +1064,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     total_search_pages(app.search_total, app.search_per_page),
                     app.search_per_page
                 ))
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(C_MUTED)),
         );
     // Scroll the table viewport so the selected row stays visible, and clamp
     // the offset at the final result so the table cannot scroll past the end
@@ -744,15 +1079,15 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     f.render_stateful_widget(table, chunks[0], &mut table_state);
 
     let input_style = if app.mode == Mode::SearchInput {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(C_WARN)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(C_TEXT)
     };
     let input = Paragraph::new(Line::from(vec![
         Span::styled(
             "Query: ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(C_ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(app.query.clone(), input_style),
@@ -762,7 +1097,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             } else {
                 ""
             },
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(C_WARN),
         ),
     ]))
     .block(
@@ -770,10 +1105,66 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .title("Search")
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(C_MUTED)),
     );
-    f.render_widget(input, chunks[1]);
+    // Autocomplete suggestions panel (only meaningful in search-input mode).
+    if app.mode == Mode::SearchInput && chunks[1].height > 0 {
+        let visible = chunks[1].height.saturating_sub(2) as usize; // borders
+        let visible = visible.max(1);
+        let start = app.suggest_scroll.min(app.suggestions.len().saturating_sub(1));
+        let end = (start + visible).min(app.suggestions.len());
+        let mut lines: Vec<Line> = Vec::new();
+        if app.suggesting && app.suggestions.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  Loading suggestions...",
+                Style::default().fg(C_MUTED),
+            )));
+        } else if app.suggestions.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  No suggestions",
+                Style::default().fg(C_MUTED),
+            )));
+        } else {
+            for (idx, (tag, count)) in app.suggestions[start..end].iter().enumerate() {
+                let real = start + idx;
+                let selected = app.suggestion_selected == Some(real);
+                let style = if selected {
+                    Style::default()
+                        .add_modifier(Modifier::REVERSED)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(C_TEXT)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {:<32}", tag), style),
+                    Span::styled(format!("{:>8}", count), style),
+                ]));
+            }
+            if app.suggestions.len() > visible {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {}-{} of {}",
+                        start + 1,
+                        end,
+                        app.suggestions.len()
+                    ),
+                    Style::default().fg(C_MUTED),
+                )));
+            }
+        }
+        let sug = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title("Suggestions (Tab accept, ↑↓ navigate, Enter search)")
+                .border_style(Style::default().fg(C_MUTED)),
+        );
+        f.render_widget(sug, chunks[1]);
+    }
+
+    f.render_widget(input, chunks[2]);
 }
+
 
 fn queue_label(snapshot: &ProgressSnapshot) -> String {
     if let Some(out_name) = snapshot.output_name() {
@@ -808,7 +1199,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
 
     let rows: Vec<Row> = if app.jobs.is_empty() {
         vec![Row::new(vec![
-            Cell::from("idle").style(Style::default().fg(Color::DarkGray)),
+            Cell::from("idle").style(Style::default().fg(C_MUTED)),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -820,10 +1211,20 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             .map(|job| {
                 let s = &job.snapshot;
                 let tag_label = queue_label(s);
-                let status_str = if s.completed + s.failed + s.skipped >= s.total && s.total > 0 {
-                    "completed"
+                let done = s.completed + s.failed + s.skipped >= s.total && s.total > 0;
+                let status_str = if done {
+                    if s.failed > 0 {
+                        "completed (errors)"
+                    } else {
+                        "completed"
+                    }
                 } else {
                     "downloading"
+                };
+                let status_color = if done {
+                    if s.failed > 0 { C_ERROR } else { C_OK }
+                } else {
+                    C_WARN
                 };
                 let pct = if s.total > 0 {
                     s.completed * 100 / s.total.max(1)
@@ -832,7 +1233,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 };
                 Row::new(vec![
                     Cell::from(tag_label),
-                    Cell::from(status_str),
+                    Cell::from(status_str).style(Style::default().fg(status_color)),
                     Cell::from(format!("{}/{} ({pct}%)", s.completed, s.total)),
                     Cell::from(if job.speed_bps > 0.0 {
                         format!("{:.1} MB/s", job.speed_bps / 1_048_576.0)
@@ -856,7 +1257,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .map(|h| {
                     Cell::from(*h).style(
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(C_ACCENT)
                             .add_modifier(Modifier::BOLD),
                     )
                 })
@@ -867,7 +1268,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title(format!("Download Queue ({})", app.jobs.len()))
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(C_MUTED)),
         );
     f.render_widget(table, chunks[0]);
 
@@ -889,9 +1290,9 @@ fn draw_queue(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title("Overall")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(C_MUTED)),
         )
-        .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
+        .gauge_style(Style::default().fg(C_OK).bg(C_MUTED))
         .percent(percent)
         .label(label);
     f.render_widget(gauge, chunks[1]);
@@ -908,7 +1309,7 @@ fn draw_history(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     ];
     let rows: Vec<Row> = if app.history.is_empty() {
         vec![Row::new(vec![
-            Cell::from("no history yet").style(Style::default().fg(Color::DarkGray)),
+            Cell::from("no history yet").style(Style::default().fg(C_MUTED)),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -937,7 +1338,7 @@ fn draw_history(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .map(|h| {
                     Cell::from(*h).style(
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(C_ACCENT)
                             .add_modifier(Modifier::BOLD),
                     )
                 })
@@ -948,7 +1349,7 @@ fn draw_history(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title(format!("Download History ({})", app.completed))
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(C_MUTED)),
         );
     f.render_widget(table, area);
 }
@@ -965,7 +1366,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             Span::styled(
                 "Completed: ",
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(C_OK)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(app.completed.to_string()),
@@ -973,7 +1374,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         Line::from(vec![
             Span::styled(
                 "Failed:     ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD),
             ),
             Span::raw(app.prog_failed.to_string()),
         ]),
@@ -981,7 +1382,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             Span::styled(
                 "Skipped:    ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(C_WARN)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(app.prog_skipped.to_string()),
@@ -990,7 +1391,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             Span::styled(
                 "Bytes:      ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(C_ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(bytes_str),
@@ -999,7 +1400,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             Span::styled(
                 "Speed:      ",
                 Style::default()
-                    .fg(Color::Magenta)
+                    .fg(C_SPEED)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(if app.speed_bps > 0.0 {
@@ -1012,7 +1413,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             Span::styled(
                 "Live:       ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(C_WARN)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(if app.prog_total > 0 {
@@ -1027,7 +1428,7 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .title("Statistics")
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(C_MUTED)),
     );
     f.render_widget(stats, chunks[0]);
 
@@ -1047,9 +1448,9 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title("Session Progress")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(C_MUTED)),
         )
-        .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
+        .gauge_style(Style::default().fg(C_ACCENT).bg(C_MUTED))
         .percent(percent)
         .label(label);
     f.render_widget(gauge, chunks[1]);
@@ -1057,11 +1458,11 @@ fn draw_stats(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
 
 fn rating_color(r: &str) -> Color {
     match r.to_lowercase().as_str() {
-        "general" | "safe" | "s" => Color::Green,
-        "sensitive" => Color::Yellow,
+        "general" | "safe" | "s" => C_OK,
+        "sensitive" => C_WARN,
         "questionable" | "q" => Color::LightYellow,
-        "explicit" | "e" | "nsfw" => Color::Red,
-        _ => Color::Gray,
+        "explicit" | "e" | "nsfw" => C_ERROR,
+        _ => C_TEXT,
     }
 }
 

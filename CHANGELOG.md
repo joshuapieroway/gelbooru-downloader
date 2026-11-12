@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-11
+
+Compare: [`v0.5.1...v0.6.0`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.5.1...v0.6.0)
+
+Major TUI and CLI feature release: search autocomplete, persisted search
+history, export command, mp4 handling, context-aware hints, and a
+centralized color palette.
+
+### Added
+
+- TUI search autocomplete: as you type, tag suggestions are fetched from
+  Gelbooru and ranked by post count (most first). `↑`/`↓` (or `Ctrl+↑`/
+  `Ctrl+↓`, `PageUp`/`PageDown`) navigate, `Tab` accepts, `Enter` searches.
+- Search history persists between sessions in
+  `search_history.txt` (capped at 100 entries); `↑`/`↓` recall previous
+  queries when no suggestions are visible.
+- `gelbooru export <tags> <json|csv> <file>` command to save search results.
+- `--include` / `--exclude` tag filters for `search`, `download`, and
+  `export`.
+- Video (mp4/webm/...) previews in the TUI viewer (first frame via kitty).
+- CLI help now includes usage examples (`after_help`).
+
+### Changed
+
+- TUI bottom hints are context-aware: search-specific binds only show on
+  the Search tab.
+- Search history is recorded per executed search (consecutive duplicates
+  collapsed).
+- Centralized TUI color palette constants for consistent theming.
+- Highlighted text (tabs, suggestions, selected row) now uses readable
+  contrast (reversed/bold or white-on-selection).
+
+### Fixed
+
+- `Ctrl+Backspace` deletes the previous word instead of inserting "H".
+- mp4 posts are filtered out of TUI search results (still downloadable
+  via CLI).
+- Autocomplete fetches are invalidated on history recall / accept / cancel
+  so stale suggestions cannot repopulate the panel.
+- Queue status cell is color-coded (completed / downloading / errors).
+
 ## [0.5.1] - 2026-11-08
 
 Compare: [`v0.5.0...v0.5.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.5.0...v0.5.1)

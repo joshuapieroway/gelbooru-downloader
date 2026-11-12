@@ -21,7 +21,8 @@ use std::sync::Arc;
 #[command(
     name = "gelbooru",
     version,
-    about = "High-performance Gelbooru downloader"
+    about = "High-performance Gelbooru downloader",
+    after_help = "Examples:\n  gelbooru search aisha_greyrat --rating explicit\n  gelbooru download norn_greyrat --limit 100 --sort score --order desc\n  gelbooru export rias_gremory csv results.csv --exclude solo_male\n  gelbooru tui\n  gelbooru queue list"
 )]
 pub struct Cli {
     #[arg(long, global = true)]
@@ -72,6 +73,12 @@ pub enum Commands {
         max_score: Option<i64>,
         #[arg(long)]
         ext: Vec<String>,
+        /// Tags that must be present on every result.
+        #[arg(long)]
+        include: Vec<String>,
+        /// Tags to exclude from results.
+        #[arg(long)]
+        exclude: Vec<String>,
         #[arg(long)]
         sort: Option<String>,
         #[arg(long)]
@@ -79,6 +86,44 @@ pub enum Commands {
     },
     Inspect {
         id: i64,
+    },
+    Export {
+        tags: String,
+        /// Output format: json or csv.
+        format: String,
+        /// Destination file path.
+        file: PathBuf,
+        #[arg(long)]
+        rating: Option<String>,
+        /// Maximum matching posts (defaults to `search.default_limit`).
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        min_width: Option<u32>,
+        #[arg(long)]
+        max_width: Option<u32>,
+        #[arg(long)]
+        min_height: Option<u32>,
+        #[arg(long)]
+        max_height: Option<u32>,
+        #[arg(long)]
+        min_size: Option<u64>,
+        #[arg(long)]
+        max_size: Option<u64>,
+        #[arg(long)]
+        min_score: Option<i64>,
+        #[arg(long)]
+        max_score: Option<i64>,
+        #[arg(long)]
+        ext: Vec<String>,
+        #[arg(long)]
+        include: Vec<String>,
+        #[arg(long)]
+        exclude: Vec<String>,
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long)]
+        order: Option<String>,
     },
     Download {
         /// tags or post id
@@ -98,6 +143,10 @@ pub enum Commands {
         /// Override the configured folder template for this download.
         #[arg(long)]
         folder_template: Option<String>,
+        #[arg(long)]
+        include: Vec<String>,
+        #[arg(long)]
+        exclude: Vec<String>,
         #[arg(long)]
         sort: Option<String>,
         #[arg(long)]
@@ -255,6 +304,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             min_score,
             max_score,
             ext,
+            include,
+            exclude,
             sort,
             order,
         } => {
@@ -262,6 +313,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             if let Some(r) = &rating {
                 rules.ratings = crate::filters::rules::parse_ratings(r);
             }
+            rules.include_tags = include;
+            rules.exclude_tags = exclude;
             rules.min_width = min_width;
             rules.max_width = max_width;
             rules.min_height = min_height;
@@ -309,6 +362,88 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 println!("{:#?}", post);
             }
         }
+        Commands::Export {
+            tags,
+            format,
+            file,
+            rating,
+            limit,
+            min_width,
+            max_width,
+            min_height,
+            max_height,
+            min_size,
+            max_size,
+            min_score,
+            max_score,
+            ext,
+            include,
+            exclude,
+            sort,
+            order,
+        } => {
+            let mut rules = FilterRules::default();
+            if let Some(r) = &rating {
+                rules.ratings = crate::filters::rules::parse_ratings(r);
+            }
+            rules.include_tags = include;
+            rules.exclude_tags = exclude;
+            rules.min_width = min_width;
+            rules.max_width = max_width;
+            rules.min_height = min_height;
+            rules.max_height = max_height;
+            rules.min_size = min_size;
+            rules.max_size = max_size;
+            rules.min_score = min_score;
+            rules.max_score = max_score;
+            rules.extensions = ext;
+            let params = search::SearchParams {
+                tags: tags.clone(),
+                rating: rating.clone(),
+                limit: limit.unwrap_or(cfg.search.default_limit),
+                page_size: cfg.search.page_size,
+                sort: sort.clone(),
+                order: order.clone(),
+                filters: rules,
+            };
+            let posts = search::search_all(&client, &cfg, &params).await?;
+            let format = format.to_ascii_lowercase();
+            match format.as_str() {
+                "json" => {
+                    let data = serde_json::to_string_pretty(&posts)?;
+                    std::fs::write(&file, data)?;
+                }
+                "csv" => {
+                    let mut w = String::new();
+                    w.push_str("id,rating,width,height,score,extension,file_url,tags\n");
+                    for p in &posts {
+                        // Quote fields that may contain commas/newlines.
+                        let tags = p.tags.replace('"', "\"\"");
+                        let url = p.file_url.replace('"', "\"\"");
+                        let line = format!(
+                            "{},{},{},{},{},{},{},{}",
+                            p.id,
+                            p.rating,
+                            p.width,
+                            p.height,
+                            p.score,
+                            p.extension(),
+                            url,
+                            tags
+                        );
+                        w.push_str(&line);
+                        w.push('\n');
+                    }
+                    std::fs::write(&file, w)?;
+                }
+                other => {
+                    anyhow::bail!("unsupported export format '{}': expected 'json' or 'csv'", other);
+                }
+            }
+            if !cli.quiet {
+                println!("Exported {} post(s) to {}", posts.len(), file.display());
+            }
+        }
         Commands::Download {
             target,
             rating,
@@ -317,6 +452,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             force,
             filename_template,
             folder_template,
+            include,
+            exclude,
             sort,
             order,
         } => {
@@ -359,6 +496,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 if let Some(r) = &rating {
                     rules.ratings = crate::filters::rules::parse_ratings(r);
                 }
+                rules.include_tags = include;
+                rules.exclude_tags = exclude;
                 search::validate_sort_order(&sort, &order)?;
                 let params = search::SearchParams {
                     tags: target.clone(),

@@ -146,6 +146,51 @@ impl GelbooruClient {
         Ok(posts)
     }
 
+    /// Autocomplete tags matching `prefix`, returning (name, post_count) pairs.
+    /// Results are returned in API order; callers should sort by count desc.
+    pub async fn tag_autocomplete(
+        &self,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, i64)>> {
+        let url = format!("{}/index.php", self.base_url);
+        let limit_s = limit.clamp(1, 500).to_string();
+        let pattern = format!("{}%", prefix);
+        let mut req = self.http.get(&url).query(&[
+            ("page", "dapi"),
+            ("s", "tag"),
+            ("q", "index"),
+            ("name_pattern", &pattern),
+            ("limit", &limit_s),
+            ("json", "1"),
+        ]);
+        req = self.apply_auth(req);
+        let resp = self.send_with_retry(req).await?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Http(e.to_string()))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| AppError::Api(format!("json parse: {}", e)))?;
+        let mut out = Vec::new();
+        if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
+            for t in arr {
+                let name = t
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
+                if !name.is_empty() {
+                    out.push((name, count));
+                }
+            }
+        }
+        // Sort by post count descending (most popular first), then name.
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
     fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if !self.user_id.is_empty() && !self.api_key.is_empty() {
             req.query(&[("user_id", &self.user_id), ("api_key", &self.api_key)])

@@ -1066,19 +1066,18 @@ fn draw_footer(
     let hint = Style::default().fg(MUTED);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::raw(" "),
-            Span::styled("←/→", key),
-            Span::styled(" nav   ", hint),
+            Span::styled("<->", key),
+            Span::styled(" nav  ", hint),
             Span::styled("j/k", key),
-            Span::styled(" tag   ", hint),
+            Span::styled(" tags  ", hint),
             Span::styled("c", key),
-            Span::styled(" ID   ", hint),
+            Span::styled(" ID  ", hint),
             Span::styled("t", key),
-            Span::styled(" tags   ", hint),
+            Span::styled(" copies  ", hint),
             Span::styled("d", key),
-            Span::styled(" download   ", hint),
+            Span::styled(" dl  ", hint),
             Span::styled("o", key),
-            Span::styled(" post   ", hint),
+            Span::styled(" open  ", hint),
             Span::styled("Esc", key),
             Span::styled(" close", hint),
         ])),
@@ -1365,7 +1364,7 @@ fn media_kind(post: &Post) -> MediaKind {
 }
 
 fn is_previewable(kind: MediaKind) -> bool {
-    matches!(kind, MediaKind::Image | MediaKind::Gif)
+    matches!(kind, MediaKind::Image | MediaKind::Gif | MediaKind::Video)
 }
 
 /// Determine which URL to use for preview.
@@ -1516,8 +1515,16 @@ fn ready_status(post: &Post, path: &Path) -> String {
     let size = std::fs::metadata(path)
         .map(|m| m.len())
         .unwrap_or_else(|_| post.file_size.max(0) as u64);
+    let ext = post.extension().to_ascii_lowercase();
+    let is_video = matches!(
+        ext.as_str(),
+        "mp4" | "webm" | "mkv" | "mov" | "avi" | "wmv" | "flv" | "m4v" | "mpg"
+            | "mpeg" | "ogv" | "ts"
+    );
+    let suffix = if is_video { " (first frame)" } else { "" };
     format!(
-        "Ready · {} · {} × {} px · {}",
+        "Ready{} · {} · {} × {} px · {}",
+        suffix,
         display_ext(post),
         post.width,
         post.height,
@@ -1617,6 +1624,18 @@ fn place_image(post: &Post, path: &Path, rect: Rect) -> Result<(), String> {
         .arg("--scale-up")
         .arg("--place")
         .arg(&place);
+
+    // Videos are shown as a single (first) frame: kitty can play them, but
+    // looping would keep the icat process alive and wedge the TUI's wait.
+    let ext = post.extension().to_ascii_lowercase();
+    let is_video = matches!(
+        ext.as_str(),
+        "mp4" | "webm" | "mkv" | "mov" | "avi" | "wmv" | "flv" | "m4v" | "mpg"
+            | "mpeg" | "ogv" | "ts"
+    );
+    if is_video {
+        cmd.arg("--loop").arg("0");
+    }
 
     cmd.arg(path).stdout(Stdio::inherit()).stderr(Stdio::null());
 
