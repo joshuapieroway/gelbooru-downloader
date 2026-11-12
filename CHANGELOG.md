@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-11-12
+
+Patch release: toggleable sidebar in the image viewer.
+
+### Added
+
+- Press `s` in the viewer to toggle the details/tags sidebar; the image
+  area expands to fill the freed space. Footer hint updated.
+
 ## [0.6.3] - 2026-11-12
 
 Patch release: exact-match fallback for tags filtered from autocomplete.

@@ -210,6 +210,7 @@ pub async fn show(
     }
 
     let mut index = start.min(posts.len() - 1);
+    let mut show_sidebar = true;
     let mut all_posts: Vec<Post> = posts;
     // The caller hands us exactly one page of results (the one the search tab
     // is showing), so the loaded range starts out as a single page.  Pressing
@@ -311,6 +312,7 @@ pub async fn show(
                 &mut tag_state,
                 &status,
                 &downloads_summary,
+                show_sidebar,
             );
             clear_images();
 
@@ -338,6 +340,7 @@ pub async fn show(
             &mut tag_state,
             &status,
             &downloads_summary,
+            show_sidebar,
         );
 
         if let (Phase::Ready, Some(path)) = (&phase, &preview) {
@@ -353,6 +356,7 @@ pub async fn show(
                     &mut tag_state,
                     &status,
                     &downloads_summary,
+                    show_sidebar,
                 );
             }
         }
@@ -412,6 +416,7 @@ pub async fn show(
                         &mut tag_state,
                         &status,
                         &downloads_summary,
+                        show_sidebar,
                     );
                 }
                 continue;
@@ -458,6 +463,7 @@ pub async fn show(
                                         &mut tag_state,
                                         &status,
                                         &downloads_summary,
+                                        show_sidebar,
                                     );
 
                                     match load_page(client, &query, search_per_page, prev).await {
@@ -493,6 +499,7 @@ pub async fn show(
                                         &mut tag_state,
                                         &status,
                                         &downloads_summary,
+                                        show_sidebar,
                                     );
                                     continue 'gallery;
                                 } else {
@@ -505,6 +512,7 @@ pub async fn show(
                                         &mut tag_state,
                                         &status,
                                         &downloads_summary,
+                                        show_sidebar,
                                     );
                                 }
                             }
@@ -531,6 +539,7 @@ pub async fn show(
                                         &mut tag_state,
                                         &status,
                                         &downloads_summary,
+                                        show_sidebar,
                                     );
 
                                     match load_page(client, &query, search_per_page, next).await {
@@ -563,6 +572,7 @@ pub async fn show(
                                         &mut tag_state,
                                         &status,
                                         &downloads_summary,
+                                        show_sidebar,
                                     );
                                     continue 'gallery;
                                 } else {
@@ -575,6 +585,7 @@ pub async fn show(
                                         &mut tag_state,
                                         &status,
                                         &downloads_summary,
+                                        show_sidebar,
                                     );
                                 }
                             } else {
@@ -587,6 +598,7 @@ pub async fn show(
                                     &mut tag_state,
                                     &status,
                                     &downloads_summary,
+                                    show_sidebar,
                                 );
                             }
                         }
@@ -600,6 +612,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
@@ -612,6 +625,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         KeyCode::PageUp => {
@@ -624,6 +638,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         KeyCode::PageDown => {
@@ -636,6 +651,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         KeyCode::Home => {
@@ -648,6 +664,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         KeyCode::End => {
@@ -660,6 +677,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         KeyCode::Char('c') => {
@@ -677,6 +695,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         KeyCode::Char('t') => {
@@ -694,6 +713,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         KeyCode::Char('o') => {
@@ -711,7 +731,29 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
+                        }
+                        KeyCode::Char('s') => {
+                            show_sidebar = !show_sidebar;
+                            if show_sidebar {
+                                status = "Sidebar shown".to_string();
+                            } else {
+                                status = "Sidebar hidden (image enlarged)".to_string();
+                            }
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                &mut tag_state,
+                                &status,
+                                &downloads_summary,
+                                show_sidebar,
+                            );
+                            if let (Phase::Ready, Some(path)) = (&phase, &preview) {
+                                let _ = place_image(post, path, last_img_rect);
+                            }
                         }
                         KeyCode::Char('d') => {
                             if queue.is_active(post.id).await {
@@ -747,6 +789,7 @@ pub async fn show(
                                 &mut tag_state,
                                 &status,
                                 &downloads_summary,
+                                show_sidebar,
                             );
                         }
                         _ => {}
@@ -773,6 +816,7 @@ pub async fn show(
                             &mut tag_state,
                             &status,
                             &downloads_summary,
+                            show_sidebar,
                         );
                     }
                 }
@@ -786,6 +830,7 @@ pub async fn show(
                         &mut tag_state,
                         &status,
                         &downloads_summary,
+                        show_sidebar,
                     );
                     if let (Phase::Ready, Some(path)) = (&phase, &preview) {
                         let _ = place_image(post, path, last_img_rect);
@@ -810,7 +855,7 @@ struct Regions {
     image: Rect,
 }
 
-fn regions(area: Rect) -> Regions {
+fn regions(area: Rect, show_sidebar: bool) -> Regions {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -821,7 +866,10 @@ fn regions(area: Rect) -> Regions {
         .split(area);
 
     let main = rows[1];
-    let (details, tags, image) = if main.width >= 78 {
+    let (details, tags, image) = if !show_sidebar {
+        // Sidebar hidden: image takes the whole area.
+        (Rect::default(), Rect::default(), main)
+    } else if main.width >= 78 {
         // Wide terminal: details/tags on the left, image on the right.
         let info_w = ((main.width as u32 * 38 / 100) as u16).clamp(34, 48);
         let cols = Layout::default()
@@ -873,6 +921,7 @@ fn regions(area: Rect) -> Regions {
 
 /// Draw one viewer frame. Returns the image interior rect and the max tag
 /// scroll offset so key handling can clamp properly.
+#[allow(clippy::too_many_arguments)]
 fn draw(
     terminal: &mut TuiTerminal,
     posts: &[Post],
@@ -881,18 +930,21 @@ fn draw(
     tags: &mut TagState,
     status: &str,
     downloads: &str,
+    show_sidebar: bool,
 ) -> Rect {
     let mut img_rect = Rect::default();
     let post = &posts[index];
 
     let _ = terminal.draw(|f| {
         let area = f.area();
-        let reg = regions(area);
+        let reg = regions(area, show_sidebar);
 
         draw_header(f, post, index, posts.len(), reg.header);
         let out = draw_image_block(f, post, phase, reg.image);
         img_rect = out.0;
-        draw_details_and_tags(f, post, reg.details, reg.tags, tags);
+        if show_sidebar {
+            draw_details_and_tags(f, post, reg.details, reg.tags, tags);
+        }
         draw_footer(f, phase, status, downloads, reg.status, reg.hints);
     });
 
@@ -1144,6 +1196,8 @@ fn draw_footer(
             Span::styled(" dl  ", hint),
             Span::styled("o", key),
             Span::styled(" open  ", hint),
+            Span::styled("s", key),
+            Span::styled(" sidebar  ", hint),
             Span::styled("Esc", key),
             Span::styled(" close", hint),
         ])),
@@ -2229,7 +2283,7 @@ mod tests {
             ] {
                 terminal
                     .draw(|f| {
-                        let reg = regions(f.area());
+                        let reg = regions(f.area(), true);
                         draw_header(f, &posts[0], 0, 1, reg.header);
                         let _ = draw_image_block(f, &posts[0], &phase, reg.image);
                         draw_details_and_tags(f, &posts[0], reg.details, reg.tags, &mut tags);
@@ -2353,7 +2407,7 @@ mod tests {
 
         terminal
             .draw(|f| {
-                let reg = regions(f.area());
+                let reg = regions(f.area(), true);
                 draw_details_and_tags(f, &post, reg.details, reg.tags, &mut tags);
             })
             .unwrap();
