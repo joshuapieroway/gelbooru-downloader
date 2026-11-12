@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-11-12
+
+Compare: [`v0.6.1...v0.6.2`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.6.1...v0.6.2)
+
+Patch release: controversial tags now appear in TUI autocomplete.
+
+### Fixed
+
+- TUI tag autocomplete now merges the website's `autocomplete2` results with
+  a DAPI prefix search, so tags filtered out of autocomplete (e.g. "loli",
+  "gore") still surface, sorted by post count.
+
 ## [0.6.1] - 2026-11-11
 
 Compare: [`v0.6.0...v0.6.1`](https://github.com/joshuapieroway/gelbooru-downloader-rs/compare/v0.6.0...v0.6.1)
