@@ -80,20 +80,15 @@ fn app_tag_type_cache() -> &'static Mutex<HashMap<String, i64>> {
     APP_TAG_TYPE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn tags_of_type(post: &Post, ty: i64) -> String {
+/// First tag of a given type only (used for compact columns).
+fn first_tag_of_type(post: &Post, ty: i64) -> String {
     let cache = app_tag_type_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let out: Vec<String> = post
-        .tag_list()
+    post.tag_list()
         .into_iter()
-        .filter(|t| cache.get(t).copied().unwrap_or(0) == ty)
-        .collect();
-    if out.is_empty() {
-        "-".to_string()
-    } else {
-        out.join(", ")
-    }
+        .find(|t| cache.get(t).copied().unwrap_or(0) == ty)
+        .unwrap_or_else(|| "-".to_string())
 }
 
 struct AppState {
@@ -1101,8 +1096,8 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     Cell::from(p.rating.clone())
                         .style(Style::default().fg(rating_color(&p.rating))),
                     Cell::from(p.score.to_string()),
-                    Cell::from(truncate_chars(&tags_of_type(p, 4), 28)),
-                    Cell::from(truncate_chars(&tags_of_type(p, 3), 28)),
+                    Cell::from(truncate_chars(&first_tag_of_type(p, 4), 28)),
+                    Cell::from(truncate_chars(&first_tag_of_type(p, 3), 28)),
                     Cell::from(truncate_chars(&p.tags, 60)),
                 ])
                 .style(style)
