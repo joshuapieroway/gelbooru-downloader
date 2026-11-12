@@ -741,7 +741,8 @@ pub async fn show(
                             } else {
                                 status = "Sidebar hidden (image enlarged)".to_string();
                             }
-                            let _ = draw(
+                            clear_images();
+                            last_img_rect = draw(
                                 terminal,
                                 &all_posts,
                                 index,
