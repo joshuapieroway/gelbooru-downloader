@@ -10,6 +10,7 @@ use std::collections::HashSet;
 /// starts at post 50, while page 2 with `limit=100` starts at post 100.
 pub const MAX_PAGE_SIZE: u32 = 100;
 
+#[derive(Clone)]
 pub struct SearchParams {
     pub tags: String,
     pub rating: Option<String>,
@@ -59,6 +60,16 @@ pub fn validate_sort_order(sort: &Option<String>, order: &Option<String>) -> Res
     Ok(())
 }
 
+/// Translate user-friendly `&` (AND) operator into Gelbooru's tag syntax
+/// (spaces are AND). `|` (OR) is NOT supported by the DAPI and is handled
+/// separately by the callers (client-side union of per-branch results).
+pub fn translate_operators(q: &str) -> String {
+    q.replace('&', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl SearchParams {
     pub fn new(tags: String) -> Self {
         Self {
@@ -74,6 +85,37 @@ impl SearchParams {
 }
 
 pub async fn search_all(
+    client: &GelbooruClient,
+    cfg: &Config,
+    params: &SearchParams,
+) -> Result<Vec<Post>> {
+    if params.tags.contains('|') {
+        let branches: Vec<&str> = params.tags.split('|').collect();
+        let mut merged: Vec<Post> = Vec::new();
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for branch in branches {
+            let branch = branch.trim();
+            if branch.is_empty() {
+                continue;
+            }
+            let mut branch_params = params.clone();
+            branch_params.tags = branch.to_string();
+            let posts = search_single(client, cfg, &branch_params).await?;
+            for p in posts {
+                if p.id == 0 || seen.insert(p.id) {
+                    merged.push(p);
+                }
+            }
+        }
+        if params.limit > 0 && merged.len() > params.limit as usize {
+            merged.truncate(params.limit as usize);
+        }
+        return Ok(merged);
+    }
+    search_single(client, cfg, params).await
+}
+
+pub async fn search_single(
     client: &GelbooruClient,
     cfg: &Config,
     params: &SearchParams,
@@ -120,7 +162,7 @@ pub async fn search_all(
         }
     }
 
-    let mut tags = params.tags.clone();
+    let mut tags = translate_operators(&params.tags);
     // An explicit `--rating` overrides a `rating:` tag in the query instead of
     // combining with it into an impossible AND filter.
     if effective_rating.is_some() && query_has_rating {

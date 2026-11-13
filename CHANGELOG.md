@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.15] - 2026-11-13
+
+Patch release: AND/OR filtering in search.
+
+### Added
+
+- Search queries support `&` (AND) and `|` (OR) operators in both the TUI
+  search tab and the CLI (`search`, `download`, `export`). `&` is a
+  separator (AND, Gelbooru's default); `|` unions results from each branch.
+- Footer hint updated to mention `&`/`|`.
+
 ## [0.6.14] - 2026-11-12
 
 Patch release: wrap search status messages.

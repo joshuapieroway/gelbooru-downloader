@@ -324,34 +324,55 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
     };
     let state = state.clone();
     tokio::spawn(async move {
-        let result = client
-            .search_page(&query, per_page as u32, page as u32, None, None)
-            .await;
+        // Support `|` (OR) by fetching each branch and merging/deduping.
+        let branches: Vec<&str> = if query.contains('|') {
+            query.split('|').collect()
+        } else {
+            vec![query.as_str()]
+        };
 
-        // Fetch tag types for the page so the Character/Series columns can
-        // be rendered without a per-row request.
-        if let Ok((posts, _)) = &result {
+        let mut merged: Vec<crate::api::models::Post> = Vec::new();
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut total = 0i64;
+        let mut fetch_err: Option<String> = None;
+
+        for branch in branches {
+            let api_query = crate::api::search::translate_operators(branch.trim());
+            if api_query.is_empty() {
+                continue;
+            }
+            match client
+                .search_page(&api_query, per_page as u32, page as u32, None, None)
+                .await
+            {
+                Ok((posts, t)) => {
+                    total = total.max(t);
+                    for p in posts {
+                        if p.id != 0 && !seen.insert(p.id) {
+                            continue;
+                        }
+                        if !p.extension().eq_ignore_ascii_case("mp4") {
+                            merged.push(p);
+                        }
+                    }
+                }
+                Err(e) => {
+                    fetch_err = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+
+        // Fetch tag types for the merged page.
+        if fetch_err.is_none() {
             let mut unique: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for p in posts {
+            for p in &merged {
                 for t in p.tag_list() {
                     unique.insert(t);
                 }
             }
             let unique: Vec<String> = unique.into_iter().collect();
-            match client.tags_by_names(&unique).await {
-                Ok(fetched) => {
-                    eprintln!("TAGFETCH ok: {} tags", fetched.len());
-                    let mut cache = app_tag_type_cache()
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    for (name, ty) in fetched {
-                        cache.insert(name, ty);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("TAGFETCH err: {}", e);
-                }
-            }
+            let _ = client.tags_by_names(&unique).await;
         }
 
         let mut st = safe_lock(&state);
@@ -359,28 +380,20 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
             return;
         }
         st.searching = false;
-        match result {
-            Ok((posts, total)) => {
-                // mp4 files are never shown in the TUI list, but remain
-                // downloadable through the CLI (`gelbooru download`).
-                st.results = posts
-                    .into_iter()
-                    .filter(|p| !p.extension().eq_ignore_ascii_case("mp4"))
-                    .collect();
-                st.search_total = total;
-                st.search_page = page;
-                st.clamp_search_scroll();
-                st.search_error = if st.results.is_empty() {
-                    Some("No results".to_string())
-                } else {
-                    None
-                };
-            }
-            Err(e) => {
-                st.results.clear();
-                st.search_total = 0;
-                st.search_error = Some(e.to_string());
-            }
+        if let Some(e) = fetch_err {
+            st.results.clear();
+            st.search_total = 0;
+            st.search_error = Some(e);
+        } else {
+            st.results = merged;
+            st.search_total = total;
+            st.search_page = page;
+            st.clamp_search_scroll();
+            st.search_error = if st.results.is_empty() {
+                Some("No results".to_string())
+            } else {
+                None
+            };
         }
     });
 }
@@ -1030,7 +1043,9 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
                 "Tab/←→ view  1-4 select  q quit"
             }
         }
-        Mode::SearchInput => "Type query  ↑↓ history  Tab accept  Enter search  Esc cancel",
+        Mode::SearchInput => {
+            "Type query (& and, | or)  ↑↓ history  Tab accept  Enter search  Esc cancel"
+        }
     };
     let footer = Paragraph::new(Span::styled(help, Style::default().fg(C_MUTED))).block(
         Block::default()
