@@ -111,15 +111,38 @@ impl GelbooruClient {
                 params.push(("order", ord.to_string()));
             }
         }
-        let mut req = self.http.get(&url).query(&params);
-        req = self.apply_auth(req);
-        let resp = self.send_with_retry(req).await?;
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| AppError::Http(e.to_string()))?;
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| AppError::Api(format!("json parse: {}", e)))?;
+        // Retry the whole request on a non-JSON/empty body (often a transient
+        // rate-limit or gateway response) with exponential backoff.
+        let mut attempt = 0u32;
+        let v = loop {
+            let req = self
+                .http
+                .get(&url)
+                .query(&params)
+                .try_clone()
+                .ok_or_else(|| AppError::Http("cannot clone request".into()))?;
+            let req = self.apply_auth(req);
+            let resp = self.send_with_retry(req).await?;
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| AppError::Http(e.to_string()))?;
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => break v,
+                Err(e) => {
+                    attempt += 1;
+                    if attempt > self.max_retries {
+                        return Err(AppError::Api(format!(
+                            "json parse: {} body={}",
+                            e,
+                            text.chars().take(120).collect::<String>()
+                        )));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt.min(6))))
+                        .await;
+                }
+            }
+        };
         let total = v
             .get("@attributes")
             .and_then(|a| a.get("count"))

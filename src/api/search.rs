@@ -193,8 +193,9 @@ pub async fn search_all(
             break;
         }
         page += 1;
-        // small politeness delay
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Politeness delay to avoid Gelbooru rate-limiting (HTTP 429) on
+        // large paginated searches.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     if total_limit > 0 {
         out.truncate(total_limit as usize);

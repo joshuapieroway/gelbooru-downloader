@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.11] - 2026-11-12
+
+Patch release: robustness against rate-limited/empty API responses.
+
+### Fixed
+
+- `search_page` now retries the whole request (with backoff) when the
+  response body is empty or not valid JSON, instead of failing immediately.
+- Increased inter-page politeness delay in paginated searches (50ms -> 500ms)
+  to avoid Gelbooru HTTP 429 rate limiting on large downloads.
+
 ## [0.6.10] - 2026-11-12
 
 Patch release: configurable search result columns.

@@ -1094,9 +1094,6 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     } else {
         app.search_columns.clone()
     };
-    let ncols = cols.len().max(1);
-
-    // Compute percentage widths from weights.
     let total_w: u32 = cols.iter().map(|c| search_col_weight(c)).sum();
     let widths: Vec<Constraint> = cols
         .iter()
@@ -1124,24 +1121,36 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         Some(app.scroll.min(app.results.len().saturating_sub(1)))
     };
 
-    let rows: Vec<Row> = if app.searching {
-        let mut cells = vec![Cell::from("Searching...").style(Style::default().fg(C_WARN))];
-        cells.resize(ncols, Cell::from(""));
-        vec![Row::new(cells)]
-    } else if let Some(err) = &app.search_error {
-        let mut cells =
-            vec![Cell::from(format!("Error: {}", err)).style(Style::default().fg(C_ERROR))];
-        cells.resize(ncols, Cell::from(""));
-        vec![Row::new(cells)]
-    } else if app.results.is_empty() {
-        let mut cells = vec![
-            Cell::from("No results. Press / to type a query, then Enter to search.")
-                .style(Style::default().fg(C_MUTED)),
-        ];
-        cells.resize(ncols, Cell::from(""));
-        vec![Row::new(cells)]
+    let has_data = !app.searching && app.search_error.is_none() && !app.results.is_empty();
+
+    if !has_data {
+        let (msg, color) = if app.searching {
+            ("Searching...".to_string(), C_WARN)
+        } else if let Some(err) = &app.search_error {
+            (format!("Error: {}", err), C_ERROR)
+        } else {
+            (
+                "No results. Press / to type a query, then Enter to search.".to_string(),
+                C_MUTED,
+            )
+        };
+        let para = Paragraph::new(msg).style(Style::default().fg(color)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(format!(
+                    "Search Results ({})  Page {}/{}  Per page {}",
+                    app.results.len(),
+                    app.search_page,
+                    total_search_pages(app.search_total, app.search_per_page),
+                    app.search_per_page
+                ))
+                .border_style(Style::default().fg(C_MUTED)),
+        );
+        f.render_widget(para, chunks[0]);
     } else {
-        app.results
+        let rows: Vec<Row> = app
+            .results
             .iter()
             .enumerate()
             .map(|(i, p)| {
@@ -1168,75 +1177,45 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     .collect();
                 Row::new(cells).style(style)
             })
-            .collect()
-    };
+            .collect();
 
-    let table = Table::new(rows, &widths)
-        .header(Row::new(
-            header
-                .iter()
-                .map(|h| {
-                    Cell::from(*h).style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
-                })
-                .collect::<Vec<_>>(),
-        ))
-        .column_spacing(0)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(format!(
-                    "Search Results ({})  Page {}/{}  Per page {}",
-                    app.results.len(),
-                    app.search_page,
-                    total_search_pages(app.search_total, app.search_per_page),
-                    app.search_per_page
-                ))
-                .border_style(Style::default().fg(C_MUTED)),
-        );
-    // Scroll the table viewport so the selected row stays visible, and clamp
-    // the offset at the final result so the table cannot scroll past the end
-    // of the current page.
-    let visible_rows = usize::from(chunks[0].height.saturating_sub(3)).max(1);
-    let offset = selected
-        .map(|s| s.saturating_sub(visible_rows.saturating_sub(1)))
-        .unwrap_or(0);
-    let mut table_state = TableState::default()
-        .with_selected(selected)
-        .with_offset(offset);
-    f.render_stateful_widget(table, chunks[0], &mut table_state);
-
-    let input_style = if app.mode == Mode::SearchInput {
-        Style::default().fg(C_WARN)
-    } else {
-        Style::default().fg(C_TEXT)
-    };
-    let input = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "Query: ",
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(app.query.clone(), input_style),
-        Span::styled(
-            if app.mode == Mode::SearchInput {
-                "█"
-            } else {
-                ""
-            },
-            Style::default().fg(C_WARN),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title("Search")
-            .border_style(Style::default().fg(C_MUTED)),
-    );
+        let table = Table::new(rows, &widths)
+            .header(Row::new(
+                header
+                    .iter()
+                    .map(|h| {
+                        Cell::from(*h)
+                            .style(Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+            .column_spacing(0)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(format!(
+                        "Search Results ({})  Page {}/{}  Per page {}",
+                        app.results.len(),
+                        app.search_page,
+                        total_search_pages(app.search_total, app.search_per_page),
+                        app.search_per_page
+                    ))
+                    .border_style(Style::default().fg(C_MUTED)),
+            );
+        let visible_rows = usize::from(chunks[0].height.saturating_sub(3)).max(1);
+        let offset = selected
+            .map(|s| s.saturating_sub(visible_rows.saturating_sub(1)))
+            .unwrap_or(0);
+        let mut table_state = TableState::default()
+            .with_selected(selected)
+            .with_offset(offset);
+        f.render_stateful_widget(table, chunks[0], &mut table_state);
+    }
 
     // Autocomplete suggestions panel (only meaningful in search-input mode).
     if app.mode == Mode::SearchInput && chunks[1].height > 0 {
-        let visible = chunks[1].height.saturating_sub(2) as usize; // borders
+        let visible = chunks[1].height.saturating_sub(2) as usize;
         let visible = visible.max(1);
         let start = app
             .suggest_scroll
@@ -1286,6 +1265,33 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         f.render_widget(sug, chunks[1]);
     }
 
+    let input_style = if app.mode == Mode::SearchInput {
+        Style::default().fg(C_WARN)
+    } else {
+        Style::default().fg(C_TEXT)
+    };
+    let input = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "Query: ",
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(app.query.clone(), input_style),
+        Span::styled(
+            if app.mode == Mode::SearchInput {
+                "█"
+            } else {
+                ""
+            },
+            Style::default().fg(C_WARN),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title("Search")
+            .border_style(Style::default().fg(C_MUTED)),
+    );
     f.render_widget(input, chunks[2]);
 }
 
