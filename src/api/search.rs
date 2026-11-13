@@ -152,50 +152,94 @@ pub async fn search_all(
     let total_limit = params.limit; // 0 means unlimited
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let mut page = 1u32;
-    loop {
+    // Gelbooru caps a single search at ~1000 results ("Too deep!"). To
+    // fetch more (e.g. `--limit 0`), we continue with an `id:<min>` filter
+    // that skips already-collected posts, repeating until no new posts arrive.
+    let mut min_id: Option<i64> = None;
+    let mut round = 0u32;
+    'outer: loop {
         if total_limit > 0 && out.len() as u32 >= total_limit {
             break;
         }
-        // Always request a full page, even when only a few results are still
-        // wanted. Shrinking the last page changes its `pid` offset and would
-        // return posts that were already fetched.
-        let (posts, _total) = client
-            .search_page(
-                &tags,
-                page_size,
-                page,
-                params.sort.as_deref(),
-                params.order.as_deref(),
-            )
-            .await?;
-        let fetched = posts.len();
-        if fetched == 0 {
+        if round >= 50 {
             break;
         }
-        let mut new_ids = 0usize;
-        for post in posts {
-            let id_is_new = post.id == 0 || seen.insert(post.id);
-            if !id_is_new {
-                continue;
-            }
-            new_ids += 1;
-            if !filters.matches(&post) {
-                continue;
-            }
-            out.push(post);
+        round += 1;
+        let mut page = 1u32;
+        let mut hit_too_deep = false;
+        let mut collected_this_round = 0usize;
+        loop {
             if total_limit > 0 && out.len() as u32 >= total_limit {
                 break;
             }
+            // Always request a full page, even when only a few results are still
+            // wanted. Shrinking the last page changes its `pid` offset and would
+            // return posts that were already fetched.
+            let search_result = client
+                .search_page(
+                    &tags,
+                    page_size,
+                    page,
+                    params.sort.as_deref(),
+                    params.order.as_deref(),
+                )
+                .await;
+            let posts = match search_result {
+                Ok((p, _)) => p,
+                Err(crate::utils::error::AppError::TooDeep) => {
+                    hit_too_deep = true;
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
+            let fetched = posts.len();
+            if fetched == 0 {
+                break;
+            }
+            let mut new_ids = 0usize;
+            for post in posts {
+                let id_is_new = post.id == 0 || seen.insert(post.id);
+                if !id_is_new {
+                    continue;
+                }
+                new_ids += 1;
+                if post.id != 0 {
+                    min_id = Some(min_id.map_or(post.id, |m| m.min(post.id)));
+                }
+                if !filters.matches(&post) {
+                    continue;
+                }
+                out.push(post);
+                if total_limit > 0 && out.len() as u32 >= total_limit {
+                    break;
+                }
+            }
+            collected_this_round += new_ids;
+            // A server that ignores `pid` would otherwise loop forever.
+            if new_ids == 0 || fetched < page_size as usize {
+                break;
+            }
+            page += 1;
+            // Politeness delay to avoid Gelbooru rate-limiting (HTTP 429) on
+            // large paginated searches.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-        // A server that ignores `pid` would otherwise loop forever.
-        if new_ids == 0 || fetched < page_size as usize {
-            break;
+        if !hit_too_deep {
+            break 'outer;
         }
-        page += 1;
-        // Politeness delay to avoid Gelbooru rate-limiting (HTTP 429) on
-        // large paginated searches.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Continue past the deep-pagination cap using an id filter.
+        if min_id.is_none() || collected_this_round == 0 {
+            break 'outer;
+        }
+        let mid = min_id.unwrap();
+        // Drop any previous `id:<...` filter and apply the new (lower) bound
+        // so we can keep paging through the remaining posts.
+        let base_tags: Vec<&str> = tags
+            .split_whitespace()
+            .filter(|t| !t.to_ascii_lowercase().starts_with("id:<"))
+            .collect();
+        let new_tags = base_tags.join(" ");
+        tags = format!("{} id:<{}", new_tags, mid);
     }
     if total_limit > 0 {
         out.truncate(total_limit as usize);

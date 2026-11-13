@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.13] - 2026-11-12
+
+Patch release: fetch all results despite Gelbooru's deep-pagination cap.
+
+### Fixed
+
+- `search_all` now continues past Gelbooru's ~1000-result pagination cap by
+  re-querying with an `id:<min>` filter, so `--limit 0` (unlimited)
+  downloads fetch every available post instead of stopping at ~1000.
+- Reduced inter-page delay to 200ms.
+
 ## [0.6.12] - 2026-11-12
 
 Patch release: handle Gelbooru deep-pagination cap.

@@ -20,6 +20,8 @@ pub enum AppError {
     Cancelled,
     #[error("Rate limited")]
     RateLimited,
+    #[error("Pagination too deep")]
+    TooDeep,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
