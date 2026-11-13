@@ -127,6 +127,11 @@ impl GelbooruClient {
                 .text()
                 .await
                 .map_err(|e| AppError::Http(e.to_string()))?;
+            // Gelbooru caps deep pagination with a non-JSON message; treat it
+            // as "no more results" rather than an error.
+            if text.contains("Too deep") {
+                return Ok((Vec::new(), 0));
+            }
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(v) => break v,
                 Err(e) => {

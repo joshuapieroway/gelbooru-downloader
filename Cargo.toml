@@ -1,6 +1,6 @@
 [package]
 name = "gelbooru-downloader"
-version = "0.6.11"
+version = "0.6.12"
 edition = "2024"
 rust-version = "1.85"
 description = "High-performance asynchronous Gelbooru API client and image downloader"
