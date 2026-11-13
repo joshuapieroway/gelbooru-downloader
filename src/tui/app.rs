@@ -17,7 +17,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table, TableState, Tabs,
+    Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -1134,19 +1134,22 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 C_MUTED,
             )
         };
-        let para = Paragraph::new(msg).style(Style::default().fg(color)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(format!(
-                    "Search Results ({})  Page {}/{}  Per page {}",
-                    app.results.len(),
-                    app.search_page,
-                    total_search_pages(app.search_total, app.search_per_page),
-                    app.search_per_page
-                ))
-                .border_style(Style::default().fg(C_MUTED)),
-        );
+        let para = Paragraph::new(msg)
+            .style(Style::default().fg(color))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(format!(
+                        "Search Results ({})  Page {}/{}  Per page {}",
+                        app.results.len(),
+                        app.search_page,
+                        total_search_pages(app.search_total, app.search_per_page),
+                        app.search_per_page
+                    ))
+                    .border_style(Style::default().fg(C_MUTED)),
+            );
         f.render_widget(para, chunks[0]);
     } else {
         let rows: Vec<Row> = app
