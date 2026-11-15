@@ -4,6 +4,5 @@
 *.part
 .DS_Store
 
-# Local-only development files
 /AGENTS.md
 /tests/
