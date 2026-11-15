@@ -749,12 +749,124 @@ fn to_dnf(expr: &Expr) -> Vec<(Vec<String>, Vec<String>)> {
     }
 }
 
+fn is_metatag(name: &str) -> bool {
+    const META: &[&str] = &[
+        "user",
+        "approver",
+        "commenter",
+        "comm",
+        "noter",
+        "noteupdater",
+        "artcomm",
+        "commentaryupdater",
+        "flagger",
+        "appealer",
+        "upvote",
+        "downvote",
+        "fav",
+        "ordfav",
+        "favgroup",
+        "ordfavgroup",
+        "pool",
+        "ordpool",
+        "note",
+        "comment",
+        "commentary",
+        "id",
+        "rating",
+        "locked",
+        "source",
+        "status",
+        "filetype",
+        "disapproved",
+        "parent",
+        "child",
+        "search",
+        "embedded",
+        "md5",
+        "width",
+        "height",
+        "mpixels",
+        "ratio",
+        "score",
+        "favcount",
+        "filesize",
+        "date",
+        "age",
+        "order",
+        "limit",
+        "tagcount",
+        "pixiv_id",
+        "pixiv",
+        "unaliased",
+        "comment_count",
+        "deleted_comment_count",
+        "active_comment_count",
+        "note_count",
+        "deleted_note_count",
+        "active_note_count",
+        "flag_count",
+        "child_count",
+        "deleted_child_count",
+        "active_child_count",
+        "pool_count",
+        "deleted_pool_count",
+        "active_pool_count",
+        "series_pool_count",
+        "collection_pool_count",
+        "appeal_count",
+        "approval_count",
+        "replacement_count",
+        "comments",
+        "deleted_comments",
+        "active_comments",
+        "notes",
+        "deleted_notes",
+        "active_notes",
+        "flags",
+        "children",
+        "deleted_children",
+        "active_children",
+        "pools",
+        "deleted_pools",
+        "active_pools",
+        "series_pools",
+        "collection_pools",
+        "appeals",
+        "approvals",
+        "replacements",
+        "gentags",
+        "chartags",
+        "copytags",
+        "arttags",
+        "metatags",
+        "sort",
+    ];
+    META.contains(&name.to_ascii_lowercase().as_str())
+}
+
+fn split_metatags(q: &str) -> (Vec<String>, String) {
+    let mut meta = Vec::new();
+    let mut rest = Vec::new();
+    for tok in q.split_whitespace() {
+        if let Some((prefix, _)) = tok.split_once(':') {
+            if is_metatag(prefix) {
+                meta.push(tok.to_string());
+                continue;
+            }
+        }
+        rest.push(tok.to_string());
+    }
+    (meta, rest.join(" "))
+}
+
 pub async fn search_expr(
     client: &GelbooruClient,
     cfg: &Config,
     params: &SearchParams,
 ) -> Result<Vec<Post>> {
-    let expr = match parse_query_expr(&params.tags) {
+    let (metatags, rest) = split_metatags(&params.tags);
+    let expr = match parse_query_expr(&rest) {
         Some(e) => e,
         None => {
             // Fall back to plain search if parsing fails.
@@ -769,7 +881,12 @@ pub async fn search_expr(
         .filter(|(req, _)| !req.is_empty())
         .collect();
     if conjunctions.is_empty() {
-        return Ok(Vec::new());
+        if metatags.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut p = params.clone();
+        p.tags = metatags.join(" ");
+        return search_single(client, cfg, &p).await;
     }
 
     // Fetch each conjunction in parallel for speed.
@@ -780,9 +897,17 @@ pub async fn search_expr(
         let params = params.clone();
         let req = req.clone();
         let excl = excl.clone();
+        let metatags = metatags.clone();
         handles.push(tokio::spawn(async move {
             let mut branch_params = params.clone();
-            branch_params.tags = req.join(" ");
+            let mut tag_str = req.join(" ");
+            for m in &metatags {
+                if !tag_str.is_empty() {
+                    tag_str.push(' ');
+                }
+                tag_str.push_str(m);
+            }
+            branch_params.tags = tag_str;
             let posts = search_single(&client, &cfg, &branch_params).await?;
             let mut out = Vec::new();
             for p in posts {

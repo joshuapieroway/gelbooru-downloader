@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-11-15
+
+Patch release: sort metatags work in complex queries.
+
+### Fixed
+
+- `sort:score`, `rating:`, `id:`, etc. metatags inside bracketed/boolean
+  search expressions are now passed through to the API instead of being
+  treated as content tags.
+
 ## [1.0.1] - 2026-11-15
 
 Patch release: operator prefix preserved on autocomplete accept.
