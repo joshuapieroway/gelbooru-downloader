@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-14
+
+Major feature release: search expression language, configurable columns,
+in-TUI settings, and performance improvements.
+
+### Added
+
+- Boolean search expressions with brackets, `|` (OR), `-` (NOT): e.g.
+  `( aisha_greyrat | norn_greyrat ) & mushoku_tensei`.
+- Configurable search result columns (`[search] columns`).
+- In-TUI settings tab for editing configuration.
+- Search history persistence across sessions.
+- TUI tag autocomplete with post-count ranking.
+- Export command (`gelbooru export`).
+- Video preview in the viewer (first frame).
+- Quick download directory config.
+
+### Changed
+
+- Search results columns: Rating, Score, Character, Series, Tags.
+- Context-aware bottom hints.
+- Parallelized autocomplete and tag-type fetching.
+
 ## [0.6.24] - 2026-11-14
 
 Patch release: more speed improvements.
