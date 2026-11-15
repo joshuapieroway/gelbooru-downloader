@@ -324,4 +324,104 @@ mod tests {
         assert_eq!(cfg.search.default_limit, 100);
         assert_eq!(cfg.search.page_size, 100);
     }
+
+    #[test]
+    fn new_fields_have_sensible_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.search.columns == vec!["rating", "score", "character", "series", "tags"]);
+        assert!(cfg.downloads.quick_download_directory.is_none());
+        assert!(!cfg.downloads.character_include_series);
+        assert!(cfg.downloads.folder_template.is_empty());
+        assert!(cfg.downloads.bandwidth_limit.is_none());
+    }
+
+    #[test]
+    fn search_columns_validates_and_dedups() {
+        let mut cfg = Config::default();
+        cfg.search.columns = vec![
+            "RATING".to_string(),
+            "bogus".to_string(),
+            "score".to_string(),
+            "rating".to_string(),
+            "tags".to_string(),
+        ];
+        let cols = cfg.search_columns();
+        assert_eq!(cols, vec!["rating", "score", "tags"]);
+    }
+
+    #[test]
+    fn search_columns_falls_back_to_default_when_empty() {
+        let mut cfg = Config::default();
+        cfg.search.columns = vec![];
+        let cols = cfg.search_columns();
+        assert_eq!(cols, vec!["rating", "score", "character", "series", "tags"]);
+        cfg.search.columns = vec!["nope".to_string()];
+        let cols = cfg.search_columns();
+        assert_eq!(cols, vec!["rating", "score", "character", "series", "tags"]);
+    }
+
+    #[test]
+    fn quick_download_dir_defaults_to_subdir() {
+        let mut cfg = Config::default();
+        cfg.downloads.directory = "/tmp/gelbooru-test".to_string();
+        assert_eq!(
+            cfg.quick_download_dir(),
+            std::path::PathBuf::from("/tmp/gelbooru-test/quick-downloads")
+        );
+    }
+
+    #[test]
+    fn quick_download_dir_honors_override() {
+        let mut cfg = Config::default();
+        cfg.downloads.directory = "/tmp/gelbooru-test".to_string();
+        cfg.downloads.quick_download_directory = Some("/tmp/custom-qd".to_string());
+        assert_eq!(
+            cfg.quick_download_dir(),
+            std::path::PathBuf::from("/tmp/custom-qd")
+        );
+    }
+
+    #[test]
+    fn quick_download_dir_empty_override_falls_back() {
+        let mut cfg = Config::default();
+        cfg.downloads.directory = "/tmp/gelbooru-test".to_string();
+        cfg.downloads.quick_download_directory = Some("   ".to_string());
+        assert_eq!(
+            cfg.quick_download_dir(),
+            std::path::PathBuf::from("/tmp/gelbooru-test/quick-downloads")
+        );
+    }
+
+    #[test]
+    fn full_config_round_trips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.downloads.directory = "~/Pictures/Gelbooru".to_string();
+        cfg.downloads.concurrency = 4;
+        cfg.downloads.character_include_series = true;
+        cfg.search.columns = vec!["id".to_string(), "rating".to_string(), "tags".to_string()];
+        cfg.search.default_rating = "explicit".to_string();
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let parsed: Config = toml::from_str(&s).unwrap();
+        assert_eq!(parsed.downloads.concurrency, 4);
+        assert!(parsed.downloads.character_include_series);
+        assert_eq!(parsed.search.columns, vec!["id", "rating", "tags"]);
+        assert_eq!(parsed.search.default_rating, "explicit");
+        assert_eq!(parsed.quick_download_dir(), cfg.quick_download_dir());
+    }
+
+    #[test]
+    fn env_override_applies() {
+        let mut cfg = Config::default();
+        unsafe {
+            std::env::set_var("GELBOORU_QUICK_DOWNLOAD_DIR", "/tmp/env-qd");
+        }
+        cfg.apply_env();
+        assert_eq!(
+            cfg.downloads.quick_download_directory.as_deref(),
+            Some("/tmp/env-qd")
+        );
+        unsafe {
+            std::env::remove_var("GELBOORU_QUICK_DOWNLOAD_DIR");
+        }
+    }
 }
