@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-11-15
+
+First stable release. All major features are complete and tested.
+
+### Added (cumulative)
+
+- TUI with search, queue, history, stats, and settings tabs.
+- Full-screen image viewer with tag selection, quick download, sidebar toggle.
+- Search autocomplete ranked by post count, with controversial-tag fallback.
+- AND/OR/NOT search with bracketed grouping.
+- Persistent search history.
+- Export command (JSON/CSV).
+- Configurable search result columns.
+- In-TUI settings editor.
+- Video preview (first frame) in kitty.
+- Quick download directory config.
+- Character/series categorization in viewer.
+
+### Changed
+
+- Context-aware bottom hints.
+- Centralized color palette.
+
 ## [0.7.0] - 2026-11-14
 
 Major feature release: search expression language, configurable columns,
