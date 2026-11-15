@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-11-15
+
+Patch release: operator prefix preserved on autocomplete accept.
+
+### Fixed
+
+- Pressing Enter no longer auto-accepts a highlighted suggestion, so
+  prefixed queries like `-tree` are not rewritten to `tree`.
+- `Tab` now preserves a leading operator (`-`, `~`, `!`) when accepting a
+  suggestion.
+
 ## [1.0.0] - 2026-11-15
 
 First stable release. All major features are complete and tested.

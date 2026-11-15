@@ -667,23 +667,9 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                     st.suggest_seq = st.suggest_seq.wrapping_add(1);
                 }
                 KeyCode::Enter => {
-                    // Accept a highlighted suggestion first if any, then search.
-                    if let Some(i) = st.suggestion_selected {
-                        if let Some((tag, _)) = st.suggestions.get(i).cloned() {
-                            // Replace last token with the chosen tag.
-                            let mut parts: Vec<&str> = st.query.split_whitespace().collect();
-                            if !parts.is_empty() {
-                                parts.pop();
-                            }
-                            let mut newq = parts.join(" ");
-                            if !newq.is_empty() {
-                                newq.push(' ');
-                            }
-                            newq.push_str(&tag);
-                            newq.push(' ');
-                            st.query = newq;
-                        }
-                    }
+                    // Search the current query as typed. Suggestions are only
+                    // applied via Tab so operators/prefixes like `-tree` are
+                    // never silently rewritten.
                     st.suggestions.clear();
                     st.suggestion_selected = None;
                     st.suggest_dirty = false;
@@ -710,6 +696,17 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                 KeyCode::Tab => {
                     if let Some(i) = st.suggestion_selected {
                         if let Some((tag, _)) = st.suggestions.get(i).cloned() {
+                            // Preserve a leading operator (-, ~) on the token
+                            // being replaced so prefixes are not dropped.
+                            let last = st.query.split_whitespace().last().unwrap_or("").to_string();
+                            let mut prefix_op = String::new();
+                            for c in last.chars() {
+                                if c == '-' || c == '~' || c == '!' {
+                                    prefix_op.push(c);
+                                } else {
+                                    break;
+                                }
+                            }
                             let mut parts: Vec<&str> = st.query.split_whitespace().collect();
                             if !parts.is_empty() && !st.query.ends_with(char::is_whitespace) {
                                 parts.pop();
@@ -718,6 +715,7 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                             if !newq.is_empty() {
                                 newq.push(' ');
                             }
+                            newq.push_str(&prefix_op);
                             newq.push_str(&tag);
                             newq.push(' ');
                             st.query = newq;
