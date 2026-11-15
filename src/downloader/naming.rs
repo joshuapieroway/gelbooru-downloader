@@ -391,6 +391,7 @@ mod tests {
             id: 42,
             rating: "sensitive".to_string(),
             score: 5,
+            md5: "abc123".to_string(),
             tags: "tangtang_(arknights) arknights:_endfield".to_string(),
             ..Post::default()
         };
@@ -401,14 +402,86 @@ mod tests {
             "{character}/{rating}",
             "",
         );
-        // Character should be extracted as "tangtang (arknights)"
-        // After sanitization: "tangtang__arknights_"
-        // Rating: "sensitive"
+        // Character extracted as "tangtang (arknights)", sanitized to
+        // "tangtang__arknights_" (spaces/parens -> underscores).
+        // Rating: "sensitive". Filename: descending score (5) + _42.jpg.
+        let s = path.to_string_lossy();
         assert!(
-            path.to_string_lossy().contains("tangtang") || path.components().count() >= 3,
-            "Got path: {:?}",
-            path
+            s.starts_with("/tmp/tangtang__arknights_/sensitive/"),
+            "path: {}",
+            s
         );
+        assert!(s.ends_with("_42.jpg"), "path: {}", s);
+    }
+
+    #[test]
+    fn output_path_with_character_namespace_folder() {
+        let post = Post {
+            id: 7,
+            rating: "general".to_string(),
+            score: 10,
+            md5: "deadbeef".to_string(),
+            tags: "character:hero artist:someone copyright:series".to_string(),
+            ..Post::default()
+        };
+        let path = output_path(
+            Path::new("/tmp"),
+            &post,
+            "{id}_{md5}.{ext}",
+            "{character}/{rating}",
+            "",
+        );
+        let s = path.to_string_lossy();
+        assert!(s.starts_with("/tmp/hero/general/"), "path: {}", s);
+    }
+
+    #[test]
+    fn output_path_character_empty_skips_segment() {
+        // No character tag -> character segment is empty -> skipped.
+        let post = Post {
+            id: 9,
+            rating: "questionable".to_string(),
+            md5: "cafe".to_string(),
+            tags: "splatoon arknights".to_string(),
+            ..Post::default()
+        };
+        let path = output_path(
+            Path::new("/tmp"),
+            &post,
+            "{id}_{md5}.{ext}",
+            "{character}/{rating}",
+            "",
+        );
+        let s = path.to_string_lossy();
+        // character empty -> segment skipped, so path is /tmp/<rating>/...
+        assert!(s.starts_with("/tmp/questionable/"), "path: {}", s);
+    }
+
+    #[test]
+    fn character_extraction_prefers_namespace() {
+        let post = Post {
+            tags: "character:zero two_(nier) general".to_string(),
+            ..Post::default()
+        };
+        let ctx = NamingContext {
+            post: &post,
+            sort_prefix: "",
+        };
+        assert_eq!(ctx.value("character"), "zero");
+    }
+
+    #[test]
+    fn character_extraction_handles_multiple_patterns() {
+        // First well-formed pattern wins.
+        let post = Post {
+            tags: "alpha_(series) beta_(other)".to_string(),
+            ..Post::default()
+        };
+        let ctx = NamingContext {
+            post: &post,
+            sort_prefix: "",
+        };
+        assert_eq!(ctx.value("character"), "alpha (series)");
     }
 
     #[test]
