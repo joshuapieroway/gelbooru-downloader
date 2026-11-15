@@ -338,7 +338,9 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
 
         if complex {
             let mut params = crate::api::search::SearchParams::new(query.clone());
-            params.limit = per_page as u32;
+            // Fetch a larger batch for complex queries so the user sees more
+            // than one page (pagination is not supported for these).
+            params.limit = 500;
             params.page_size = per_page as u32;
             match crate::api::search::search_expr(&client, &Config::default(), &params).await {
                 Ok(posts) => {

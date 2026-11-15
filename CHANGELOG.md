@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.19] - 2026-11-13
+
+Patch release: more results for complex queries.
+
+### Changed
+
+- Complex search queries (brackets, |, -) now fetch up to 500 results
+  instead of one page (50), so the results list is larger.
+
 ## [0.6.18] - 2026-11-13
 
 Patch release: parenthesized groups in search.
