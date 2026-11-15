@@ -35,7 +35,7 @@ fn safe_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     })
 }
 
-const TABS: &[&str] = &["Search", "Queue", "History", "Stats"];
+const TABS: &[&str] = &["Search", "Queue", "History", "Stats", "Settings"];
 
 // Centralized palette so the TUI keeps a consistent look. Tweak these
 // values to re-theme the whole interface.
@@ -53,6 +53,7 @@ const C_SPEED: Color = Color::Magenta;
 enum Mode {
     Normal,
     SearchInput,
+    SettingsInput,
 }
 
 /// A single row in the Queue tab showing active download jobs.
@@ -91,6 +92,116 @@ fn first_tag_of_type(post: &Post, ty: i64) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn settings_items(cfg: &Config) -> Vec<(String, String, &'static str)> {
+    vec![
+        (
+            "Download directory".to_string(),
+            cfg.downloads.directory.clone(),
+            "downloads.directory",
+        ),
+        (
+            "Concurrency".to_string(),
+            cfg.downloads.concurrency.to_string(),
+            "downloads.concurrency",
+        ),
+        (
+            "Filename template".to_string(),
+            cfg.downloads.filename_template.clone(),
+            "downloads.filename_template",
+        ),
+        (
+            "Folder template".to_string(),
+            cfg.downloads.folder_template.clone(),
+            "downloads.folder_template",
+        ),
+        (
+            "Quick download dir".to_string(),
+            cfg.downloads
+                .quick_download_directory
+                .clone()
+                .unwrap_or_default(),
+            "downloads.quick_download_directory",
+        ),
+        (
+            "Default rating".to_string(),
+            cfg.search.default_rating.clone(),
+            "search.default_rating",
+        ),
+        (
+            "Default limit".to_string(),
+            cfg.search.default_limit.to_string(),
+            "search.default_limit",
+        ),
+        (
+            "Page size".to_string(),
+            cfg.search.page_size.to_string(),
+            "search.page_size",
+        ),
+        (
+            "Columns (comma)".to_string(),
+            cfg.search.columns.join(", "),
+            "search.columns",
+        ),
+        (
+            "API base URL".to_string(),
+            cfg.api.base_url.clone(),
+            "api.base_url",
+        ),
+        (
+            "User ID".to_string(),
+            cfg.api.user_id.clone(),
+            "api.user_id",
+        ),
+        (
+            "API key".to_string(),
+            cfg.api.api_key.clone(),
+            "api.api_key",
+        ),
+    ]
+}
+
+fn apply_setting(cfg: &mut Config, key: &str, value: &str) {
+    match key {
+        "downloads.directory" => cfg.downloads.directory = value.to_string(),
+        "downloads.concurrency" => {
+            if let Ok(v) = value.parse() {
+                cfg.downloads.concurrency = v;
+            }
+        }
+        "downloads.filename_template" => cfg.downloads.filename_template = value.to_string(),
+        "downloads.folder_template" => cfg.downloads.folder_template = value.to_string(),
+        "downloads.quick_download_directory" => {
+            if value.trim().is_empty() {
+                cfg.downloads.quick_download_directory = None;
+            } else {
+                cfg.downloads.quick_download_directory = Some(value.to_string());
+            }
+        }
+        "search.default_rating" => cfg.search.default_rating = value.to_string(),
+        "search.default_limit" => {
+            if let Ok(v) = value.parse() {
+                cfg.search.default_limit = v;
+            }
+        }
+        "search.page_size" => {
+            if let Ok(v) = value.parse() {
+                cfg.search.page_size = v;
+            }
+        }
+        "search.columns" => {
+            cfg.search.columns = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        "api.base_url" => cfg.api.base_url = value.to_string(),
+        "api.user_id" => cfg.api.user_id = value.to_string(),
+        "api.api_key" => cfg.api.api_key = value.to_string(),
+        _ => {}
+    }
+}
+
 struct AppState {
     tab: usize,
     mode: Mode,
@@ -101,6 +212,12 @@ struct AppState {
     tick: u64,
     db: Option<Arc<HistoryDb>>,
     client: Option<GelbooruClient>,
+    cfg: Config,
+    config_path: Option<std::path::PathBuf>,
+    settings_selected: usize,
+    settings_editing: bool,
+    settings_input: String,
+    settings_status: String,
     completed: i64,
     history: Vec<crate::database::history::DownloadRecord>,
     last_poll: Instant,
@@ -141,6 +258,8 @@ impl AppState {
     fn new(
         db: Option<Arc<HistoryDb>>,
         client: Option<GelbooruClient>,
+        cfg: Config,
+        config_path: Option<std::path::PathBuf>,
         columns: Vec<String>,
     ) -> Self {
         Self {
@@ -153,6 +272,12 @@ impl AppState {
             tick: 0,
             db,
             client,
+            cfg,
+            config_path,
+            settings_selected: 0,
+            settings_editing: false,
+            settings_input: String::new(),
+            settings_status: String::new(),
             completed: 0,
             history: Vec::new(),
             last_poll: Instant::now(),
@@ -734,8 +859,69 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                 UiAction::None
             }
         }
+        Mode::SettingsInput => {
+            match code {
+                KeyCode::Esc => {
+                    st.settings_editing = false;
+                    st.settings_input.clear();
+                    st.mode = Mode::Normal;
+                }
+                KeyCode::Enter => {
+                    let items = settings_items(&st.cfg);
+                    if let Some((_, _, key)) = items.get(st.settings_selected) {
+                        let key = *key;
+                        apply_setting(&mut st.cfg, key, &st.settings_input);
+                        // persist
+                        let path = st.config_path.clone().unwrap_or_else(|| {
+                            crate::utils::paths::config_dir().join("config.toml")
+                        });
+                        let _ = st.cfg.save(Some(&path));
+                        st.search_columns = st.cfg.search_columns();
+                        // Rebuild API client if credentials changed.
+                        if key.starts_with("api.") {
+                            st.client = GelbooruClient::new(&st.cfg).ok();
+                        }
+                        st.settings_status = format!("Saved {}", key);
+                    }
+                    st.settings_editing = false;
+                    st.settings_input.clear();
+                    st.mode = Mode::Normal;
+                }
+                KeyCode::Backspace => {
+                    st.settings_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    st.settings_input.push(c);
+                }
+                _ => {}
+            }
+            UiAction::None
+        }
         Mode::Normal => match code {
             KeyCode::Char('q') | KeyCode::Esc => UiAction::Quit,
+            KeyCode::Up if st.tab == 4 => {
+                let n = settings_items(&st.cfg).len();
+                if n > 0 {
+                    st.settings_selected = st.settings_selected.saturating_sub(1).min(n - 1);
+                }
+                UiAction::None
+            }
+            KeyCode::Down if st.tab == 4 => {
+                let n = settings_items(&st.cfg).len();
+                if n > 0 {
+                    st.settings_selected = (st.settings_selected + 1).min(n - 1);
+                }
+                UiAction::None
+            }
+            KeyCode::Enter if st.tab == 4 => {
+                let items = settings_items(&st.cfg);
+                if let Some((_, val, _)) = items.get(st.settings_selected) {
+                    st.settings_editing = true;
+                    st.settings_input = val.clone();
+                    st.mode = Mode::SettingsInput;
+                }
+                UiAction::None
+            }
             KeyCode::Tab | KeyCode::Right => {
                 st.tab = (st.tab + 1) % TABS.len();
                 st.scroll = 0;
@@ -784,6 +970,11 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
             }
             KeyCode::Char('4') => {
                 st.tab = 3;
+                st.scroll = 0;
+                UiAction::None
+            }
+            KeyCode::Char('5') => {
+                st.tab = 4;
                 st.scroll = 0;
                 UiAction::None
             }
@@ -874,7 +1065,13 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
             }
         });
     }
-    let state = Arc::new(Mutex::new(AppState::new(db, client, cfg.search_columns())));
+    let state = Arc::new(Mutex::new(AppState::new(
+        db,
+        client,
+        cfg.clone(),
+        None,
+        cfg.search_columns(),
+    )));
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1042,27 +1239,39 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
         1 => draw_queue(f, app, chunks[2]),
         2 => draw_history(f, app, chunks[2]),
         3 => draw_stats(f, app, chunks[2]),
+        4 => draw_settings(f, app, chunks[2]),
         _ => {}
     }
 
-    let help = match app.mode {
-        Mode::Normal => {
-            if app.tab == 0 {
-                "Tab/←→ view  1-4 select  ↑↓ scroll  / search  v view  q quit"
-            } else {
-                "Tab/←→ view  1-4 select  q quit"
+    if app.tab != 4 {
+        let help = match app.mode {
+            Mode::Normal => {
+                if app.tab == 0 {
+                    "Tab/←→ view  1-4 select  ↑↓ scroll  / search  v view  q quit"
+                } else {
+                    "Tab/←→ view  1-5 select  q quit"
+                }
             }
-        }
-        Mode::SearchInput => {
-            "Type query (( ) or [ ] group, | or, - not)  ↑↓ history  Tab accept  Enter search  Esc cancel"
-        }
-    };
-    let footer = Paragraph::new(Span::styled(help, Style::default().fg(C_MUTED))).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded),
-    );
-    f.render_widget(footer, chunks[3]);
+            Mode::SearchInput => {
+                "Type query (( ) or [ ] group, | or, - not)  ↑↓ history  Tab accept  Enter search  Esc cancel"
+            }
+            Mode::SettingsInput => "Type value  Enter save  Esc cancel",
+        };
+        let footer = Paragraph::new(Span::styled(help, Style::default().fg(C_MUTED))).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        );
+        f.render_widget(footer, chunks[3]);
+    } else {
+        // Settings tab renders its own footer.
+        let footer = Paragraph::new("").block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        );
+        f.render_widget(footer, chunks[3]);
+    }
 }
 
 fn search_col_weight(col: &str) -> u32 {
@@ -1321,6 +1530,61 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
             .border_style(Style::default().fg(C_MUTED)),
     );
     f.render_widget(input, chunks[2]);
+}
+
+fn draw_settings(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .split(area);
+
+    let items = settings_items(&app.cfg);
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (label, value, _)) in items.iter().enumerate() {
+        let selected = i == app.settings_selected;
+        let style = if selected {
+            Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_TEXT)
+        };
+        let display_val = if app.settings_editing && selected {
+            format!("{}█", app.settings_input)
+        } else {
+            value.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<24}", label), style),
+            Span::styled(" = ", Style::default().fg(C_MUTED)),
+            Span::styled(display_val, style),
+        ]));
+    }
+    if !app.settings_status.is_empty() {
+        lines.push(Line::from(Span::styled(
+            app.settings_status.clone(),
+            Style::default().fg(C_OK),
+        )));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Settings (Enter edit, Esc cancel) ")
+        .border_style(Style::default().fg(C_MUTED));
+    f.render_widget(Paragraph::new(lines).block(block), chunks[0]);
+
+    let help = if app.mode == Mode::SettingsInput {
+        "Type value  Enter save  Esc cancel"
+    } else {
+        "↑↓ select  Enter edit  Tab switch views  q quit"
+    };
+    let footer = Paragraph::new(Span::styled(help, Style::default().fg(C_MUTED))).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded),
+    );
+    f.render_widget(footer, chunks[1]);
 }
 
 fn queue_label(snapshot: &ProgressSnapshot) -> String {
@@ -1631,7 +1895,7 @@ mod tests {
 
     #[test]
     fn same_tag_with_different_ratings_stays_separate_in_queue() {
-        let mut app = AppState::new(None, None, Vec::new());
+        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
         app.update_jobs(
             vec![
                 snapshot("a", "general,sensitive", "/out/safe", 10, 2, 100),
@@ -1654,7 +1918,7 @@ mod tests {
 
     #[test]
     fn same_tag_and_rating_with_different_outputs_stays_separate_in_queue() {
-        let mut app = AppState::new(None, None, Vec::new());
+        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
         app.update_jobs(
             vec![
                 snapshot("a", "general", "/out/safe", 10, 1, 0),
@@ -1672,7 +1936,7 @@ mod tests {
 
     #[test]
     fn per_job_speed_and_eta_come_from_the_previous_poll() {
-        let mut app = AppState::new(None, None, Vec::new());
+        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
         let start = Instant::now();
         app.update_jobs(vec![snapshot("a", "general", "/out", 10, 0, 0)], start);
 
@@ -1691,7 +1955,7 @@ mod tests {
 
     #[test]
     fn finished_jobs_are_removed_from_the_queue() {
-        let mut app = AppState::new(None, None, Vec::new());
+        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
         let now = Instant::now();
         app.update_jobs(
             vec![
@@ -1728,7 +1992,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = AppState::new(None, None, Vec::new());
+        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
         app.update_jobs(
             vec![
                 snapshot("a", "general,sensitive", "/out/safe", 10, 2, 100),
@@ -1765,7 +2029,7 @@ mod tests {
 
     #[test]
     fn search_scroll_cannot_pass_the_last_result() {
-        let mut app = AppState::new(None, None, Vec::new());
+        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
         app.results = vec![Post::default(), Post::default(), Post::default()];
         app.scroll = 99;
 
@@ -1776,7 +2040,7 @@ mod tests {
 
     #[test]
     fn search_scroll_is_zero_when_there_are_no_results() {
-        let mut app = AppState::new(None, None, Vec::new());
+        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
         app.scroll = 7;
 
         app.clamp_search_scroll();

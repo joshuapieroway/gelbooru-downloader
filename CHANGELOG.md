@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.20] - 2026-11-14
+
+Patch release: in-TUI settings tab.
+
+### Added
+
+- New "Settings" tab (5) lets you view and edit configuration values
+  (download dir, concurrency, templates, rating, page size, columns, API
+  creds, quick download dir) and saves to the config file on Enter.
+
 ## [0.6.19] - 2026-11-13
 
 Patch release: more results for complex queries.
