@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.21] - 2026-11-14
+
+Patch release: complex queries in TUI.
+
+### Fixed
+
+- Complex queries (brackets, `|`, `-`) now work in the TUI search tab:
+  they fetch up to 500 results and apply no default rating filter (matching
+  the CLI behaviour).
+
 ## [0.6.20] - 2026-11-14
 
 Patch release: in-TUI settings tab.

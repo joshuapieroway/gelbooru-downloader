@@ -467,7 +467,9 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
             // than one page (pagination is not supported for these).
             params.limit = 500;
             params.page_size = per_page as u32;
-            match crate::api::search::search_expr(&client, &Config::default(), &params).await {
+            let mut cfg = Config::default();
+            cfg.search.default_rating = "all".to_string();
+            match crate::api::search::search_expr(&client, &cfg, &params).await {
                 Ok(posts) => {
                     total = posts.len() as i64;
                     for p in posts {
