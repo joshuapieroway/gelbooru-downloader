@@ -29,29 +29,41 @@ gelbooru queue list
 gelbooru queue resume
 gelbooru queue retry
 gelbooru queue clear --failed
+gelbooru export "landscape sky" csv results.csv
 gelbooru repl
 gelbooru tui
 ```
 
 ## TUI
 
-Run `gelbooru tui`, press `/` to search, and `v` (or Enter) on a result to
-open the full-screen viewer. In the viewer:
+Run `gelbooru tui`. Tabs: Search, Queue, History, Stats, Settings (keys `1`-`5`
+or `Tab`/`←`/`→`).
+
+- `/` opens the search input. Type a query; tag suggestions appear ranked by
+  post count. `Tab` accepts a suggestion, `↑`/`↓` navigate suggestions or
+  recall previous searches, `Enter` searches, `Esc` cancels.
+- Search supports `&` (AND, default), `|` (OR) and `-` (NOT) plus
+  bracketed grouping: `(aisha_greyrat | norn_greyrat) mushoku_tensei`.
+- `n`/`p` page, `+`/`-` change page size, `v`/Enter open the viewer.
+- Bottom hints are context-aware per tab.
+
+In the viewer:
 
 | Key | Action |
 | --- | --- |
 | `←` / `→` | previous / next post |
 | `j` / `k` | select the previous / next tag |
+| `Enter` | open the selected tag as a new search |
 | `c` / `t` | copy post ID / tags |
 | `o` | open the post on Gelbooru |
-| `d` | queue a download to `<downloads.directory>/quick-downloads/` |
-| `Esc` | close the viewer (queued downloads continue in the background) |
+| `d` | queue a download to the quick download directory |
+| `s` | toggle the details/tags sidebar (enlarges the image) |
+| `Esc` / `q` | close the viewer |
 
-Quick downloads go to a dedicated subfolder (default
-`~/Pictures/Gelbooru/quick-downloads/`), are recorded in history like any
-other download, and stay in the persistent queue until they finish. Pressing
-`d` on several posts queues them concurrently, up to
-`downloads.concurrency` (default 16); progress stays visible in the footer.
+Quick downloads go to a dedicated subfolder (configurable via
+`downloads.quick_download_directory`, default
+`<downloads.directory>/quick-downloads/`), are recorded in history like any
+other download, and stay in the persistent queue until they finish.
 
 ## Filename and folder templates
 
@@ -118,4 +130,24 @@ gelbooru queue remove <id>     # drop one row
 
 TOML config with env/CLI overrides. Run `gelbooru config --init` to create a config file. XDG directories used by default.
 
-Environment variables: `GELBOORU_BASE_URL`, `GELBOORU_USER_ID`, `GELBOORU_API_KEY`, `GELBOORU_DOWNLOAD_DIR`, `GELBOORU_CONCURRENCY`.
+Environment variables: `GELBOORU_BASE_URL`, `GELBOORU_USER_ID`, `GELBOORU_API_KEY`, `GELBOORU_DOWNLOAD_DIR`, `GELBOORU_QUICK_DOWNLOAD_DIR`, `GELBOORU_CONCURRENCY`.
+
+### Notable config options
+
+```toml
+[downloads]
+directory = "~/Pictures/Gelbooru"
+quick_download_directory = ""   # empty = <directory>/quick-downloads
+character_include_series = false
+folder_template = "{character}/{rating}"
+filename_template = "{score}_{id}.{ext}"
+
+[search]
+default_rating = "all"
+page_size = 50
+columns = ["rating", "score", "character", "series", "tags"]
+```
+
+`search.columns` accepts: `id`, `rating`, `score`, `size`, `character`,
+`series`, `tags`, `date` (in any order). Settings are also editable live in
+the TUI Settings tab.
