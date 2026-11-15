@@ -772,20 +772,39 @@ pub async fn search_expr(
         return Ok(Vec::new());
     }
 
+    // Fetch each conjunction in parallel for speed.
+    let mut handles = Vec::new();
+    for (req, excl) in conjunctions.clone() {
+        let client = client.clone();
+        let cfg = cfg.clone();
+        let params = params.clone();
+        let req = req.clone();
+        let excl = excl.clone();
+        handles.push(tokio::spawn(async move {
+            let mut branch_params = params.clone();
+            branch_params.tags = req.join(" ");
+            let posts = search_single(&client, &cfg, &branch_params).await?;
+            let mut out = Vec::new();
+            for p in posts {
+                if !excl.is_empty()
+                    && excl
+                        .iter()
+                        .any(|e| p.tag_list().iter().any(|t| t.eq_ignore_ascii_case(e)))
+                {
+                    continue;
+                }
+                out.push(p);
+            }
+            Ok::<_, crate::utils::error::AppError>(out)
+        }));
+    }
     let mut merged: Vec<Post> = Vec::new();
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for (req, excl) in &conjunctions {
-        let mut branch_params = params.clone();
-        branch_params.tags = req.join(" ");
-        let posts = search_single(client, cfg, &branch_params).await?;
+    for h in handles {
+        let posts = h
+            .await
+            .map_err(|e| crate::utils::error::AppError::Http(e.to_string()))??;
         for p in posts {
-            if !excl.is_empty()
-                && excl
-                    .iter()
-                    .any(|e| p.tag_list().iter().any(|t| t.eq_ignore_ascii_case(e)))
-            {
-                continue;
-            }
             if p.id == 0 || seen.insert(p.id) {
                 merged.push(p);
             }

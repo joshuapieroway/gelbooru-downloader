@@ -331,52 +331,63 @@ impl GelbooruClient {
     }
 
     /// Fetch tag metadata (name -> type) for the given tag names. Names are
-    /// batched to avoid overly long request URLs (servers reject very large
-    /// `names=` values), and results are merged.
+    /// batched (max ~100 per request due to URL length limits) and the
+    /// batches run concurrently for speed.
     pub async fn tags_by_names(&self, names: &[String]) -> Result<Vec<(String, i64)>> {
         if names.is_empty() {
             return Ok(Vec::new());
         }
         const BATCH: usize = 100;
-        let mut out = Vec::new();
+        let mut handles = Vec::new();
         for chunk in names.chunks(BATCH) {
-            let url = format!("{}/index.php", self.base_url);
-            let joined = chunk.join(" ");
-            let mut req = self.http.get(&url).query(&[
-                ("page", "dapi"),
-                ("s", "tag"),
-                ("q", "index"),
-                ("names", &joined),
-                ("limit", "1000"),
-                ("json", "1"),
-            ]);
-            req = self.apply_auth(req);
-            let resp = self.send_with_retry(req).await?;
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| AppError::Http(e.to_string()))?;
-            let v: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| AppError::Api(format!("json parse: {}", e)))?;
-            if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
-                for t in arr {
-                    let name = t
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let ty = t.get("type").and_then(|c| c.as_i64()).unwrap_or(0);
-                    if !name.is_empty() {
-                        out.push((name, ty));
+            let client = self.clone();
+            let chunk: Vec<String> = chunk.to_vec();
+            handles.push(tokio::spawn(async move {
+                let url = format!("{}/index.php", client.base_url);
+                let joined = chunk.join(" ");
+                let mut req = client.http.get(&url).query(&[
+                    ("page", "dapi"),
+                    ("s", "tag"),
+                    ("q", "index"),
+                    ("names", &joined),
+                    ("limit", "1000"),
+                    ("json", "1"),
+                ]);
+                req = client.apply_auth(req);
+                let mut out = Vec::new();
+                if let Ok(resp) = client.send_with_retry(req).await {
+                    if let Ok(text) = resp.text().await {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
+                                for t in arr {
+                                    let name = t
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let ty = t.get("type").and_then(|c| c.as_i64()).unwrap_or(0);
+                                    if !name.is_empty() {
+                                        out.push((name, ty));
+                                    }
+                                }
+                            } else if let Some(t) = v.get("tag") {
+                                if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
+                                    let ty = t.get("type").and_then(|c| c.as_i64()).unwrap_or(0);
+                                    if !name.is_empty() {
+                                        out.push((name.to_string(), ty));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-            } else if let Some(t) = v.get("tag") {
-                if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
-                    let ty = t.get("type").and_then(|c| c.as_i64()).unwrap_or(0);
-                    if !name.is_empty() {
-                        out.push((name.to_string(), ty));
-                    }
-                }
+                out
+            }));
+        }
+        let mut out = Vec::new();
+        for h in handles {
+            if let Ok(batch) = h.await {
+                out.extend(batch);
             }
         }
         Ok(out)
