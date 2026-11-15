@@ -115,6 +115,11 @@ fn settings_items(cfg: &Config) -> Vec<(String, String, &'static str)> {
             "downloads.folder_template",
         ),
         (
+            "Character include series".to_string(),
+            cfg.downloads.character_include_series.to_string(),
+            "downloads.character_include_series",
+        ),
+        (
             "Quick download dir".to_string(),
             cfg.downloads
                 .quick_download_directory
@@ -170,6 +175,10 @@ fn apply_setting(cfg: &mut Config, key: &str, value: &str) {
         }
         "downloads.filename_template" => cfg.downloads.filename_template = value.to_string(),
         "downloads.folder_template" => cfg.downloads.folder_template = value.to_string(),
+        "downloads.character_include_series" => {
+            cfg.downloads.character_include_series =
+                value.eq_ignore_ascii_case("true") || value == "1";
+        }
         "downloads.quick_download_directory" => {
             if value.trim().is_empty() {
                 cfg.downloads.quick_download_directory = None;

@@ -446,6 +446,7 @@ impl DownloadEngine {
             filename_template,
             folder_template,
             &sort_prefix,
+            self.config.downloads.character_include_series,
         );
 
         // if file already exists on disk, skip

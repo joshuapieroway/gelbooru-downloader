@@ -51,6 +51,10 @@ pub struct DownloadsConfig {
     pub filename_template: String,
     #[serde(default)]
     pub folder_template: String,
+    /// When true, append the series (copyright) to the extracted character
+    /// name, e.g. `hero` -> `hero (series)`.
+    #[serde(default)]
+    pub character_include_series: bool,
     /// Directory for quick downloads from the image viewer. Empty/unset
     /// defaults to `<download_dir>/quick-downloads`.
     #[serde(default)]
@@ -85,6 +89,7 @@ impl Default for DownloadsConfig {
             bandwidth_limit: None,
             filename_template: default_filename_template(),
             folder_template: String::new(),
+            character_include_series: false,
             quick_download_directory: None,
         }
     }

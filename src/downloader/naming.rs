@@ -15,6 +15,7 @@ pub const DEFAULT_FILENAME_TEMPLATE: &str = "{sort_prefix}{id}_{md5}.{ext}";
 struct NamingContext<'a> {
     post: &'a Post,
     sort_prefix: &'a str,
+    include_series_in_character: bool,
 }
 
 impl NamingContext<'_> {
@@ -37,7 +38,7 @@ impl NamingContext<'_> {
             "height" => post.height.to_string(),
             "artist" => first_tag_value(&post.tags, "artist:"),
             "copyright" => first_tag_value(&post.tags, "copyright:"),
-            "character" => extract_character_name(&post.tags),
+            "character" => extract_character_name(&post.tags, self.include_series_in_character),
             "meta" => first_tag_value(&post.tags, "meta:"),
             "title" => post.title.clone(),
             "source" => source_host(&post.source),
@@ -61,8 +62,13 @@ pub fn output_path(
     filename_template: &str,
     folder_template: &str,
     sort_prefix: &str,
+    include_series_in_character: bool,
 ) -> PathBuf {
-    let ctx = NamingContext { post, sort_prefix };
+    let ctx = NamingContext {
+        post,
+        sort_prefix,
+        include_series_in_character,
+    };
     let mut path = dir.to_path_buf();
 
     for segment in folder_template.split('/') {
@@ -143,10 +149,20 @@ fn first_tag_value(tags: &str, prefix: &str) -> String {
 /// Find the first "character-like" tag, preferring `character:` namespace
 /// tags but falling back to tags matching the pattern `name_(something)`
 /// which is common for characters from games/anime that don't use namespaces.
-fn extract_character_name(tags: &str) -> String {
+fn extract_character_name(tags: &str, include_series: bool) -> String {
     // First, try the character: namespace (standard Gelbooru convention)
     let from_namespace = first_tag_value(tags, "character:");
     if !from_namespace.is_empty() {
+        if include_series {
+            let series = first_tag_value(tags, "copyright:");
+            if !series.is_empty() {
+                return format!(
+                    "{} ({})",
+                    from_namespace.replace('_', " "),
+                    series.replace('_', " ")
+                );
+            }
+        }
         return from_namespace;
     }
 
@@ -219,7 +235,14 @@ mod tests {
     fn default_template_matches_the_old_filename() {
         let post = post();
         assert_eq!(
-            output_path(Path::new("/tmp"), &post, DEFAULT_FILENAME_TEMPLATE, "", ""),
+            output_path(
+                Path::new("/tmp"),
+                &post,
+                DEFAULT_FILENAME_TEMPLATE,
+                "",
+                "",
+                false
+            ),
             PathBuf::from("/tmp/42_abc123.jpg")
         );
         assert_eq!(
@@ -228,7 +251,8 @@ mod tests {
                 &post,
                 DEFAULT_FILENAME_TEMPLATE,
                 "",
-                "0001_"
+                "0001_",
+                false,
             ),
             PathBuf::from("/tmp/0001_42_abc123.jpg")
         );
@@ -243,6 +267,7 @@ mod tests {
             "{artist}_{id}_{year}.{ext}",
             "{rating}/{copyright}",
             "",
+            false,
         );
         assert_eq!(
             path,
@@ -259,6 +284,7 @@ mod tests {
             "{id}.{ext}",
             "../../{rating}",
             "",
+            false,
         );
         assert_eq!(path, PathBuf::from("/tmp/library/safe/42.jpg"));
         assert!(path.starts_with("/tmp/library"));
@@ -268,7 +294,7 @@ mod tests {
     fn a_missing_extension_is_added() {
         let post = post();
         assert_eq!(
-            output_path(Path::new("/tmp"), &post, "{id}", "", ""),
+            output_path(Path::new("/tmp"), &post, "{id}", "", "", false),
             PathBuf::from("/tmp/42.jpg")
         );
     }
@@ -282,11 +308,12 @@ mod tests {
             "{unknown}_{id}_{md5}.{ext}",
             "{artist}/{rating}",
             "",
+            false,
         );
         assert_eq!(path, PathBuf::from("/tmp/_0_file.jpg"));
 
         assert_eq!(
-            output_path(Path::new("/tmp"), &post, "", "", ""),
+            output_path(Path::new("/tmp"), &post, "", "", "", false),
             PathBuf::from("/tmp/0_file.jpg")
         );
     }
@@ -297,6 +324,7 @@ mod tests {
         let ctx = NamingContext {
             post: &post,
             sort_prefix: "",
+            include_series_in_character: false,
         };
         assert_eq!(render("{{{id}}}.{ext}", &ctx), "{42}.jpg");
     }
@@ -326,7 +354,14 @@ mod tests {
     fn score_is_descending_by_default_in_a_template() {
         let post = post();
         assert_eq!(
-            output_path(Path::new("/tmp"), &post, "{score}_{id}.{ext}", "", ""),
+            output_path(
+                Path::new("/tmp"),
+                &post,
+                "{score}_{id}.{ext}",
+                "",
+                "",
+                false
+            ),
             PathBuf::from("/tmp/0999999988_42.jpg")
         );
         assert_eq!(
@@ -335,7 +370,8 @@ mod tests {
                 &post,
                 "{score_desc}_{score_raw}_{id}.{ext}",
                 "",
-                ""
+                "",
+                false,
             ),
             PathBuf::from("/tmp/0999999988_12_42.jpg")
         );
@@ -351,6 +387,7 @@ mod tests {
         let ctx = NamingContext {
             post: &post,
             sort_prefix: "",
+            include_series_in_character: false,
         };
         assert_eq!(ctx.value("character"), "hero");
     }
@@ -365,9 +402,30 @@ mod tests {
         let ctx = NamingContext {
             post: &post,
             sort_prefix: "",
+            include_series_in_character: false,
         };
         // Should extract "tangtang (arknights)" as the character name
         assert_eq!(ctx.value("character"), "tangtang (arknights)");
+    }
+
+    #[test]
+    fn character_include_series_appends_copyright() {
+        let post = Post {
+            tags: "character:hero copyright:my_series".to_string(),
+            ..Post::default()
+        };
+        let ctx = NamingContext {
+            post: &post,
+            sort_prefix: "",
+            include_series_in_character: true,
+        };
+        assert_eq!(ctx.value("character"), "hero (my series)");
+        let ctx2 = NamingContext {
+            post: &post,
+            sort_prefix: "",
+            include_series_in_character: false,
+        };
+        assert_eq!(ctx2.value("character"), "hero");
     }
 
     #[test]
@@ -380,6 +438,7 @@ mod tests {
         let ctx = NamingContext {
             post: &post,
             sort_prefix: "",
+            include_series_in_character: false,
         };
         assert_eq!(ctx.value("character"), "");
     }
@@ -401,6 +460,7 @@ mod tests {
             "{score}_{id}.{ext}",
             "{character}/{rating}",
             "",
+            false,
         );
         // Character extracted as "tangtang (arknights)", sanitized to
         // "tangtang__arknights_" (spaces/parens -> underscores).
@@ -430,6 +490,7 @@ mod tests {
             "{id}_{md5}.{ext}",
             "{character}/{rating}",
             "",
+            false,
         );
         let s = path.to_string_lossy();
         assert!(s.starts_with("/tmp/hero/general/"), "path: {}", s);
@@ -451,6 +512,7 @@ mod tests {
             "{id}_{md5}.{ext}",
             "{character}/{rating}",
             "",
+            false,
         );
         let s = path.to_string_lossy();
         // character empty -> segment skipped, so path is /tmp/<rating>/...
@@ -466,6 +528,7 @@ mod tests {
         let ctx = NamingContext {
             post: &post,
             sort_prefix: "",
+            include_series_in_character: false,
         };
         assert_eq!(ctx.value("character"), "zero");
     }
@@ -480,6 +543,7 @@ mod tests {
         let ctx = NamingContext {
             post: &post,
             sort_prefix: "",
+            include_series_in_character: false,
         };
         assert_eq!(ctx.value("character"), "alpha (series)");
     }
@@ -495,6 +559,7 @@ mod tests {
         let ctx = NamingContext {
             post: &post,
             sort_prefix: "",
+            include_series_in_character: false,
         };
         assert_eq!(ctx.value("character"), "tangtang (arknights)");
     }
@@ -508,6 +573,7 @@ mod tests {
         let ctx = NamingContext {
             post: &post,
             sort_prefix: "",
+            include_series_in_character: false,
         };
         assert_eq!(ctx.value("character"), "good (series)");
     }
