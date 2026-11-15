@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.22] - 2026-11-14
+
+Patch release: OR results sorted and verified.
+
+### Changed
+
+- OR-merged search results are now sorted (default id desc) so branches
+  interleave properly instead of being appended.
+
 ## [0.6.21] - 2026-11-14
 
 Patch release: complex queries in TUI.
