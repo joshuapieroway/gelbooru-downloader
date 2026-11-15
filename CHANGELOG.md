@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.18] - 2026-11-13
+
+Patch release: parenthesized groups in search.
+
+### Changed
+
+- Grouping now uses space-padded parentheses `( ... )` instead of square
+  brackets, so Gelbooru tags containing parentheses (e.g.
+  `rem_(re:zero)`) are not mistaken for groups. Square brackets still work.
+
 ## [0.6.17] - 2026-11-13
 
 Patch release: simplified search operators.

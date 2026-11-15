@@ -326,6 +326,8 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
     let complex = query.contains('|')
         || query.contains('[')
         || query.contains(']')
+        || (query.contains('(') && query.contains(" ( "))
+        || (query.contains(')') && query.contains(" ) "))
         || query.contains(" -")
         || query.starts_with('-');
 
@@ -1050,7 +1052,7 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
             }
         }
         Mode::SearchInput => {
-            "Type query ([ ] group, | or, - not)  ↑↓ history  Tab accept  Enter search  Esc cancel"
+            "Type query (( ) or [ ] group, | or, - not)  ↑↓ history  Tab accept  Enter search  Esc cancel"
         }
     };
     let footer = Paragraph::new(Span::styled(help, Style::default().fg(C_MUTED))).block(

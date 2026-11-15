@@ -89,6 +89,8 @@ pub async fn search_all(
     let complex = params.tags.contains('|')
         || params.tags.contains('[')
         || params.tags.contains(']')
+        || (params.tags.contains('(') && params.tags.contains(" ( "))
+        || (params.tags.contains(')') && params.tags.contains(" ) "))
         || params.tags.contains(" -")
         || params.tags.starts_with('-');
 
@@ -568,12 +570,25 @@ fn tokenize_expr(s: &str) -> Vec<Tok> {
             i += 1;
             continue;
         }
+        // Square brackets are always grouping brackets.
         if chars[i] == '[' {
             tokens.push(Tok::Open);
             i += 1;
             continue;
         }
         if chars[i] == ']' {
+            tokens.push(Tok::Close);
+            i += 1;
+            continue;
+        }
+        // Parentheses are grouping brackets only when space-padded, so that
+        // Gelbooru tags like `rem_(re:zero)` stay intact.
+        if chars[i] == '(' && i + 1 < n && chars[i + 1].is_whitespace() {
+            tokens.push(Tok::Open);
+            i += 1;
+            continue;
+        }
+        if chars[i] == ')' && i > 0 && chars[i - 1].is_whitespace() {
             tokens.push(Tok::Close);
             i += 1;
             continue;
