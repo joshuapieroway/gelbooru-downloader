@@ -323,48 +323,54 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
         return;
     };
     let state = state.clone();
+    let complex = query.contains('|')
+        || query.contains('[')
+        || query.contains(']')
+        || query.contains(" -")
+        || query.starts_with('-');
+
     tokio::spawn(async move {
-        // Support `|` (OR) by fetching each branch and merging/deduping.
-        let branches: Vec<&str> = if query.contains('|') {
-            query.split('|').collect()
-        } else {
-            vec![query.as_str()]
-        };
-
-        let mut merged: Vec<crate::api::models::Post> = Vec::new();
-        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        let mut total = 0i64;
         let mut fetch_err: Option<String> = None;
+        let mut merged: Vec<crate::api::models::Post> = Vec::new();
+        let mut total = 0i64;
 
-        for branch in branches {
-            let api_query = crate::api::search::translate_operators(branch.trim());
-            if api_query.is_empty() {
-                continue;
-            }
-            match client
-                .search_page(&api_query, per_page as u32, page as u32, None, None)
-                .await
-            {
-                Ok((posts, t)) => {
-                    total = total.max(t);
+        if complex {
+            let mut params = crate::api::search::SearchParams::new(query.clone());
+            params.limit = per_page as u32;
+            params.page_size = per_page as u32;
+            match crate::api::search::search_expr(&client, &Config::default(), &params).await {
+                Ok(posts) => {
+                    total = posts.len() as i64;
                     for p in posts {
-                        if p.id != 0 && !seen.insert(p.id) {
-                            continue;
-                        }
                         if !p.extension().eq_ignore_ascii_case("mp4") {
                             merged.push(p);
                         }
                     }
                 }
-                Err(e) => {
-                    fetch_err = Some(e.to_string());
-                    break;
+                Err(e) => fetch_err = Some(e.to_string()),
+            }
+        } else {
+            let api_query = crate::api::search::translate_operators(&query);
+            if !api_query.is_empty() {
+                match client
+                    .search_page(&api_query, per_page as u32, page as u32, None, None)
+                    .await
+                {
+                    Ok((posts, t)) => {
+                        total = t;
+                        for p in posts {
+                            if !p.extension().eq_ignore_ascii_case("mp4") {
+                                merged.push(p);
+                            }
+                        }
+                    }
+                    Err(e) => fetch_err = Some(e.to_string()),
                 }
             }
         }
 
         // Fetch tag types for the merged page.
-        if fetch_err.is_none() {
+        if fetch_err.is_none() && !merged.is_empty() {
             let mut unique: std::collections::HashSet<String> = std::collections::HashSet::new();
             for p in &merged {
                 for t in p.tag_list() {
@@ -1044,7 +1050,7 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
             }
         }
         Mode::SearchInput => {
-            "Type query (& and, | or)  ↑↓ history  Tab accept  Enter search  Esc cancel"
+            "Type query ([ ] group, | or, - not)  ↑↓ history  Tab accept  Enter search  Esc cancel"
         }
     };
     let footer = Paragraph::new(Span::styled(help, Style::default().fg(C_MUTED))).block(

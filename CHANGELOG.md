@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.17] - 2026-11-13
+
+Patch release: simplified search operators.
+
+### Changed
+
+- Removed `&` from advertised operators (a space already means AND). Kept
+  `|` (OR) and `-` (NOT) and `[ ]` grouping.
+
+## [0.6.16] - 2026-11-13
+
+Patch release: bracketed boolean expressions in search.
+
+### Added
+
+- Search queries support bracketed grouping `[...]` (and `(...)` is treated
+  as part of tag names), plus `&` (AND), `|` (OR), and `-` (NOT) in both
+  the TUI search tab and the CLI. Expressions are evaluated client-side
+  (DNF), e.g. `[aisha_greyrat | norn_greyrat] & mushoku_tensei`.
+
 ## [0.6.15] - 2026-11-13
 
 Patch release: AND/OR filtering in search.

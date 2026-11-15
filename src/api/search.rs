@@ -60,14 +60,11 @@ pub fn validate_sort_order(sort: &Option<String>, order: &Option<String>) -> Res
     Ok(())
 }
 
-/// Translate user-friendly `&` (AND) operator into Gelbooru's tag syntax
-/// (spaces are AND). `|` (OR) is NOT supported by the DAPI and is handled
-/// separately by the callers (client-side union of per-branch results).
+/// Normalize whitespace in a search query. `&` is no longer special (a space
+/// already means AND in Gelbooru); `|` (OR) and brackets are handled by the
+/// expression parser, not here.
 pub fn translate_operators(q: &str) -> String {
-    q.replace('&', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    q.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl SearchParams {
@@ -89,29 +86,16 @@ pub async fn search_all(
     cfg: &Config,
     params: &SearchParams,
 ) -> Result<Vec<Post>> {
-    if params.tags.contains('|') {
-        let branches: Vec<&str> = params.tags.split('|').collect();
-        let mut merged: Vec<Post> = Vec::new();
-        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        for branch in branches {
-            let branch = branch.trim();
-            if branch.is_empty() {
-                continue;
-            }
-            let mut branch_params = params.clone();
-            branch_params.tags = branch.to_string();
-            let posts = search_single(client, cfg, &branch_params).await?;
-            for p in posts {
-                if p.id == 0 || seen.insert(p.id) {
-                    merged.push(p);
-                }
-            }
-        }
-        if params.limit > 0 && merged.len() > params.limit as usize {
-            merged.truncate(params.limit as usize);
-        }
-        return Ok(merged);
+    let complex = params.tags.contains('|')
+        || params.tags.contains('[')
+        || params.tags.contains(']')
+        || params.tags.contains(" -")
+        || params.tags.starts_with('-');
+
+    if complex {
+        return search_expr(client, cfg, params).await;
     }
+
     search_single(client, cfg, params).await
 }
 
@@ -550,4 +534,289 @@ mod tests {
         let res = search_all(&client, &cfg, &params).await;
         assert!(matches!(res, Err(AppError::Http(_))), "{res:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Boolean expression search (brackets, &, |, -)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum Expr {
+    Tag(String),
+    Not(Box<Expr>),
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tok {
+    Open,
+    Close,
+    And,
+    Or,
+    Not,
+    Tag(String),
+}
+
+fn tokenize_expr(s: &str) -> Vec<Tok> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if chars[i] == '[' {
+            tokens.push(Tok::Open);
+            i += 1;
+            continue;
+        }
+        if chars[i] == ']' {
+            tokens.push(Tok::Close);
+            i += 1;
+            continue;
+        }
+        if chars[i] == '&' {
+            tokens.push(Tok::And);
+            i += 1;
+            continue;
+        }
+        if chars[i] == '|' {
+            tokens.push(Tok::Or);
+            i += 1;
+            continue;
+        }
+        // '-' is NOT only at a boundary.
+        let at_boundary = i == 0
+            || chars[i - 1].is_whitespace()
+            || chars[i - 1] == '['
+            || chars[i - 1] == ']'
+            || chars[i - 1] == '&'
+            || chars[i - 1] == '|';
+        if chars[i] == '-' && at_boundary && i + 1 < n && !chars[i + 1].is_whitespace() {
+            tokens.push(Tok::Not);
+            i += 1;
+            continue;
+        }
+        // tag: read until whitespace or bracket or operator
+        let mut tag = String::new();
+        while i < n
+            && !chars[i].is_whitespace()
+            && chars[i] != '['
+            && chars[i] != ']'
+            && chars[i] != '&'
+            && chars[i] != '|'
+        {
+            tag.push(chars[i]);
+            i += 1;
+        }
+        if !tag.is_empty() {
+            tokens.push(Tok::Tag(tag));
+        }
+    }
+    tokens
+}
+
+fn parse_expr_tokens(tokens: &[Tok]) -> Option<(Expr, &[Tok])> {
+    parse_or(tokens)
+}
+
+fn parse_or(tokens: &[Tok]) -> Option<(Expr, &[Tok])> {
+    let (left, mut rest) = parse_and(tokens)?;
+    let mut ors = vec![left];
+    while matches!(rest.first(), Some(Tok::Or)) {
+        rest = &rest[1..];
+        let (right, r) = parse_and(rest)?;
+        ors.push(right);
+        rest = r;
+    }
+    if ors.len() == 1 {
+        Some((ors.pop().unwrap(), rest))
+    } else {
+        Some((Expr::Or(ors), rest))
+    }
+}
+
+fn parse_and(tokens: &[Tok]) -> Option<(Expr, &[Tok])> {
+    let (first, mut rest) = parse_not(tokens)?;
+    let mut ands = vec![first];
+    loop {
+        if rest.is_empty() || matches!(rest.first(), Some(Tok::Or) | Some(Tok::Close)) {
+            break;
+        }
+        if matches!(rest.first(), Some(Tok::And)) {
+            rest = &rest[1..];
+        }
+        // implicit AND only if next is a primary (not/primary)
+        if matches!(rest.first(), Some(Tok::Or) | Some(Tok::Close) | None) {
+            break;
+        }
+        let (right, r) = parse_not(rest)?;
+        ands.push(right);
+        rest = r;
+    }
+    if ands.len() == 1 {
+        Some((ands.pop().unwrap(), rest))
+    } else {
+        Some((Expr::And(ands), rest))
+    }
+}
+
+fn parse_not(tokens: &[Tok]) -> Option<(Expr, &[Tok])> {
+    if matches!(tokens.first(), Some(Tok::Not)) {
+        let (inner, rest) = parse_primary(&tokens[1..])?;
+        return Some((Expr::Not(Box::new(inner)), rest));
+    }
+    parse_primary(tokens)
+}
+
+fn parse_primary(tokens: &[Tok]) -> Option<(Expr, &[Tok])> {
+    match tokens.first()? {
+        Tok::Open => {
+            let (expr, rest) = parse_or(&tokens[1..])?;
+            match rest.first()? {
+                Tok::Close => Some((expr, &rest[1..])),
+                _ => None,
+            }
+        }
+        Tok::Tag(t) => Some((Expr::Tag(t.clone()), &tokens[1..])),
+        _ => None,
+    }
+}
+
+pub fn parse_query_expr(s: &str) -> Option<Expr> {
+    let toks = tokenize_expr(s);
+    let (expr, rest) = parse_expr_tokens(&toks)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(expr)
+}
+
+/// Convert an expression to DNF: a list of (required_tags, excluded_tags).
+fn to_dnf(expr: &Expr) -> Vec<(Vec<String>, Vec<String>)> {
+    match expr {
+        Expr::Tag(t) => vec![(vec![t.clone()], vec![])],
+        Expr::Not(inner) => match inner.as_ref() {
+            Expr::Tag(t) => vec![(vec![], vec![t.clone()])],
+            _ => {
+                // De Morgan: negate DNF of inner. For non-tag, skip (too complex).
+                vec![]
+            }
+        },
+        Expr::And(exprs) => {
+            let mut result = vec![(vec![], vec![])];
+            for e in exprs {
+                let dnf = to_dnf(e);
+                let mut new_result = Vec::new();
+                for (r1, e1) in &result {
+                    for (r2, e2) in &dnf {
+                        let mut r = r1.clone();
+                        r.extend(r2.clone());
+                        let mut ex = e1.clone();
+                        ex.extend(e2.clone());
+                        new_result.push((r, ex));
+                    }
+                }
+                result = new_result;
+            }
+            result
+        }
+        Expr::Or(exprs) => {
+            let mut result = Vec::new();
+            for e in exprs {
+                result.extend(to_dnf(e));
+            }
+            result
+        }
+    }
+}
+
+pub async fn search_expr(
+    client: &GelbooruClient,
+    cfg: &Config,
+    params: &SearchParams,
+) -> Result<Vec<Post>> {
+    let expr = match parse_query_expr(&params.tags) {
+        Some(e) => e,
+        None => {
+            // Fall back to plain search if parsing fails.
+            return search_single(client, cfg, params).await;
+        }
+    };
+    let conjunctions = to_dnf(&expr);
+    // Drop conjunctions with no required tags (pure exclusion) to avoid
+    // fetching the entire database.
+    let conjunctions: Vec<_> = conjunctions
+        .into_iter()
+        .filter(|(req, _)| !req.is_empty())
+        .collect();
+    if conjunctions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut merged: Vec<Post> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for (req, excl) in &conjunctions {
+        let mut branch_params = params.clone();
+        branch_params.tags = req.join(" ");
+        let posts = search_single(client, cfg, &branch_params).await?;
+        for p in posts {
+            if !excl.is_empty()
+                && excl
+                    .iter()
+                    .any(|e| p.tag_list().iter().any(|t| t.eq_ignore_ascii_case(e)))
+            {
+                continue;
+            }
+            if p.id == 0 || seen.insert(p.id) {
+                merged.push(p);
+            }
+        }
+    }
+    // sort
+    if let Some(sort) = &params.sort {
+        let desc = params
+            .order
+            .as_deref()
+            .map(|o| o.eq_ignore_ascii_case("desc"))
+            .unwrap_or(true);
+        match sort.as_str() {
+            "score" => merged.sort_by(|a, b| {
+                if desc {
+                    b.score.cmp(&a.score)
+                } else {
+                    a.score.cmp(&b.score)
+                }
+            }),
+            "id" => merged.sort_by(|a, b| {
+                if desc {
+                    b.id.cmp(&a.id)
+                } else {
+                    a.id.cmp(&b.id)
+                }
+            }),
+            "width" => merged.sort_by(|a, b| {
+                if desc {
+                    b.width.cmp(&a.width)
+                } else {
+                    a.width.cmp(&b.width)
+                }
+            }),
+            "height" => merged.sort_by(|a, b| {
+                if desc {
+                    b.height.cmp(&a.height)
+                } else {
+                    a.height.cmp(&b.height)
+                }
+            }),
+            _ => {}
+        }
+    }
+    if params.limit > 0 && merged.len() > params.limit as usize {
+        merged.truncate(params.limit as usize);
+    }
+    Ok(merged)
 }
