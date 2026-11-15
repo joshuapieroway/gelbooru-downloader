@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.23] - 2026-11-14
+
+Patch release: speed improvements.
+
+### Changed
+
+- Tag autocomplete now runs its three lookups concurrently (~3x faster).
+- Tag type fetching (Character/Series columns) uses larger batches
+  (50 -> 100), halving the number of requests.
+
 ## [0.6.22] - 2026-11-14
 
 Patch release: OR results sorted and verified.

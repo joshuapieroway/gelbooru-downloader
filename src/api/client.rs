@@ -173,136 +173,159 @@ impl GelbooruClient {
         Ok(posts)
     }
 
-    /// Autocomplete tags matching `prefix`. Uses Gelbooru's `autocomplete2`
-    /// endpoint (results sorted by post count, most first, like the website)
-    /// and supplements it with a DAPI prefix search so that tags filtered out
-    /// of autocomplete (e.g. controversial tags such as "loli"/"gore") still
-    /// appear. Merged results are de-duplicated and sorted by post count.
+    /// Autocomplete tags matching `prefix`. The three lookups run concurrently.
     pub async fn tag_autocomplete(&self, prefix: &str, _limit: u32) -> Result<Vec<(String, i64)>> {
-        let mut merged: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        let self1 = self.clone();
+        let self2 = self.clone();
+        let self3 = self.clone();
+        let prefix1 = prefix.to_string();
+        let prefix2 = prefix.to_string();
+        let prefix3 = prefix.to_string();
 
-        // 1. autocomplete2 (website's source, count-sorted).
-        let url = format!("{}/index.php", self.base_url);
-        let mut req = self.http.get(&url).query(&[
-            ("page", "autocomplete2"),
-            ("term", prefix),
-            ("type", "tag_query"),
-            ("limit", "10"),
-        ]);
-        req = self.apply_auth(req);
-        if let Ok(resp) = self.send_with_retry(req).await {
-            if let Ok(text) = resp.text().await {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(arr) = v.as_array() {
-                        for item in arr {
-                            let value = item
-                                .get("value")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let count = item
-                                .get("post_count")
-                                .and_then(|c| c.as_str())
-                                .and_then(|s| s.parse::<i64>().ok())
-                                .or_else(|| item.get("post_count").and_then(|c| c.as_i64()))
-                                .unwrap_or(0);
-                            if !value.is_empty() {
-                                merged
-                                    .entry(value)
-                                    .and_modify(|c| *c = (*c).max(count))
-                                    .or_insert(count);
+        let t1 = tokio::spawn(async move {
+            let url = format!("{}/index.php", self1.base_url);
+            let mut req = self1.http.get(&url).query(&[
+                ("page", "autocomplete2"),
+                ("term", &prefix1),
+                ("type", "tag_query"),
+                ("limit", "10"),
+            ]);
+            req = self1.apply_auth(req);
+            let mut merged: std::collections::BTreeMap<String, i64> =
+                std::collections::BTreeMap::new();
+            if let Ok(resp) = self1.send_with_retry(req).await {
+                if let Ok(text) = resp.text().await {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(arr) = v.as_array() {
+                            for item in arr {
+                                let value = item
+                                    .get("value")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let count = item
+                                    .get("post_count")
+                                    .and_then(|c| c.as_str())
+                                    .and_then(|s| s.parse::<i64>().ok())
+                                    .or_else(|| item.get("post_count").and_then(|c| c.as_i64()))
+                                    .unwrap_or(0);
+                                if !value.is_empty() {
+                                    merged
+                                        .entry(value)
+                                        .and_modify(|c| *c = (*c).max(count))
+                                        .or_insert(count);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
+            merged
+        });
 
-        // 2. DAPI prefix search (catches tags filtered from autocomplete).
-        let dapi_url = format!("{}/index.php", self.base_url);
-        let pattern = format!("{}%", prefix);
-        let mut req = self.http.get(&dapi_url).query(&[
-            ("page", "dapi"),
-            ("s", "tag"),
-            ("q", "index"),
-            ("name_pattern", &pattern),
-            ("limit", "100"),
-            ("json", "1"),
-        ]);
-        req = self.apply_auth(req);
-        if let Ok(resp) = self.send_with_retry(req).await {
-            if let Ok(text) = resp.text().await {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
-                        for t in arr {
-                            let name = t
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
-                            if !name.is_empty() {
-                                merged
-                                    .entry(name)
-                                    .and_modify(|c| *c = (*c).max(count))
-                                    .or_insert(count);
+        let t2 = tokio::spawn(async move {
+            let url = format!("{}/index.php", self2.base_url);
+            let pattern = format!("{}%", prefix2);
+            let mut req = self2.http.get(&url).query(&[
+                ("page", "dapi"),
+                ("s", "tag"),
+                ("q", "index"),
+                ("name_pattern", &pattern),
+                ("limit", "100"),
+                ("json", "1"),
+            ]);
+            req = self2.apply_auth(req);
+            let mut merged: std::collections::BTreeMap<String, i64> =
+                std::collections::BTreeMap::new();
+            if let Ok(resp) = self2.send_with_retry(req).await {
+                if let Ok(text) = resp.text().await {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
+                            for t in arr {
+                                let name = t
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
+                                if !name.is_empty() {
+                                    merged
+                                        .entry(name)
+                                        .and_modify(|c| *c = (*c).max(count))
+                                        .or_insert(count);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
+            merged
+        });
 
-        // 3. Exact-match lookup: catches tags filtered out of both autocomplete
-        //    and prefix search (e.g. "loli", "gore"). Only adds the tag when
-        //    the typed prefix is the full tag name.
-        let exact_url = format!("{}/index.php", self.base_url);
-        let mut req = self.http.get(&exact_url).query(&[
-            ("page", "dapi"),
-            ("s", "tag"),
-            ("q", "index"),
-            ("name", prefix),
-            ("json", "1"),
-        ]);
-        req = self.apply_auth(req);
-        if let Ok(resp) = self.send_with_retry(req).await {
-            if let Ok(text) = resp.text().await {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
-                        for t in arr {
-                            let name = t
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
-                            if !name.is_empty() {
-                                merged
-                                    .entry(name)
-                                    .and_modify(|c| *c = (*c).max(count))
-                                    .or_insert(count);
+        let t3 = tokio::spawn(async move {
+            let url = format!("{}/index.php", self3.base_url);
+            let mut req = self3.http.get(&url).query(&[
+                ("page", "dapi"),
+                ("s", "tag"),
+                ("q", "index"),
+                ("name", &prefix3),
+                ("json", "1"),
+            ]);
+            req = self3.apply_auth(req);
+            let mut merged: std::collections::BTreeMap<String, i64> =
+                std::collections::BTreeMap::new();
+            if let Ok(resp) = self3.send_with_retry(req).await {
+                if let Ok(text) = resp.text().await {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(arr) = v.get("tag").and_then(|t| t.as_array()) {
+                            for t in arr {
+                                let name = t
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
+                                if !name.is_empty() {
+                                    merged
+                                        .entry(name)
+                                        .and_modify(|c| *c = (*c).max(count))
+                                        .or_insert(count);
+                                }
                             }
-                        }
-                    } else if let Some(t) = v.get("tag") {
-                        // Single object (not array).
-                        if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
-                            let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
-                            if !name.is_empty() {
-                                merged
-                                    .entry(name.to_string())
-                                    .and_modify(|c| *c = (*c).max(count))
-                                    .or_insert(count);
+                        } else if let Some(t) = v.get("tag") {
+                            if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
+                                let count = t.get("count").and_then(|c| c.as_i64()).unwrap_or(0);
+                                if !name.is_empty() {
+                                    merged
+                                        .entry(name.to_string())
+                                        .and_modify(|c| *c = (*c).max(count))
+                                        .or_insert(count);
+                                }
                             }
                         }
                     }
                 }
             }
+            merged
+        });
+
+        let (r1, r2, r3) = tokio::join!(t1, t2, t3);
+        let mut merged = r1.unwrap_or_default();
+        for (k, v) in r2.unwrap_or_default() {
+            merged
+                .entry(k)
+                .and_modify(|c| *c = (*c).max(v))
+                .or_insert(v);
+        }
+        for (k, v) in r3.unwrap_or_default() {
+            merged
+                .entry(k)
+                .and_modify(|c| *c = (*c).max(v))
+                .or_insert(v);
         }
 
-        // Sort by post count descending, then name.
         let mut out: Vec<(String, i64)> = merged.into_iter().collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        // Cap to a reasonable number so the panel stays usable.
         out.truncate(20);
         Ok(out)
     }
@@ -314,7 +337,7 @@ impl GelbooruClient {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        const BATCH: usize = 50;
+        const BATCH: usize = 100;
         let mut out = Vec::new();
         for chunk in names.chunks(BATCH) {
             let url = format!("{}/index.php", self.base_url);
