@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-11-15
+
+Patch release: sort metatags applied to merged results.
+
+### Fixed
+
+- `sort:score` (and other `sort:` metatags) now correctly sort the final
+  merged result set for boolean/bracketed queries instead of being
+  overridden by the default id sort.
+
 ## [1.0.2] - 2026-11-15
 
 Patch release: sort metatags work in complex queries.

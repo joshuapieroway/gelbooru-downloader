@@ -935,57 +935,65 @@ pub async fn search_expr(
             }
         }
     }
-    // Sort (default id desc) so merged branches interleave properly.
-    let sort = params.sort.clone().unwrap_or_else(|| "id".to_string());
-    let desc = params
-        .order
-        .as_deref()
-        .map(|o| o.eq_ignore_ascii_case("desc"))
-        .unwrap_or(true);
-    match sort.as_str() {
-        "score" => merged.sort_by(|a, b| {
-            if desc {
-                b.score.cmp(&a.score)
-            } else {
-                a.score.cmp(&b.score)
-            }
-        }),
-        "id" => merged.sort_by(|a, b| {
-            if desc {
-                b.id.cmp(&a.id)
-            } else {
-                a.id.cmp(&b.id)
-            }
-        }),
-        "width" => merged.sort_by(|a, b| {
-            if desc {
-                b.width.cmp(&a.width)
-            } else {
-                a.width.cmp(&b.width)
-            }
-        }),
-        "height" => merged.sort_by(|a, b| {
-            if desc {
-                b.height.cmp(&a.height)
-            } else {
-                a.height.cmp(&b.height)
-            }
-        }),
-        "created" | "date" | "created_at" => merged.sort_by(|a, b| {
-            if desc {
-                b.created_at.cmp(&a.created_at)
-            } else {
-                a.created_at.cmp(&b.created_at)
-            }
-        }),
-        "rating" => merged.sort_by(|a, b| {
-            if desc {
-                b.rating.cmp(&a.rating)
-            } else {
-                a.rating.cmp(&b.rating)
-            }
-        }),
-        _ => {}
+    // Determine effective sort: params.sort, or a `sort:` metatag in the query.
+    let meta_sort = metatags
+        .iter()
+        .find_map(|m| m.strip_prefix("sort:").map(|s| s.to_string()));
+    let eff_sort = params.sort.clone().or(meta_sort);
+    // Only re-sort if an explicit sort was requested; otherwise keep the
+    // API's (per-branch) order so we don't clobber a metatag sort that the
+    // API already applied. When sorting, default to descending.
+    if let Some(sort) = eff_sort {
+        let desc = params
+            .order
+            .as_deref()
+            .map(|o| o.eq_ignore_ascii_case("desc"))
+            .unwrap_or(true);
+        match sort.as_str() {
+            "score" => merged.sort_by(|a, b| {
+                if desc {
+                    b.score.cmp(&a.score)
+                } else {
+                    a.score.cmp(&b.score)
+                }
+            }),
+            "id" => merged.sort_by(|a, b| {
+                if desc {
+                    b.id.cmp(&a.id)
+                } else {
+                    a.id.cmp(&b.id)
+                }
+            }),
+            "width" => merged.sort_by(|a, b| {
+                if desc {
+                    b.width.cmp(&a.width)
+                } else {
+                    a.width.cmp(&b.width)
+                }
+            }),
+            "height" => merged.sort_by(|a, b| {
+                if desc {
+                    b.height.cmp(&a.height)
+                } else {
+                    a.height.cmp(&b.height)
+                }
+            }),
+            "created" | "date" | "created_at" => merged.sort_by(|a, b| {
+                if desc {
+                    b.created_at.cmp(&a.created_at)
+                } else {
+                    a.created_at.cmp(&b.created_at)
+                }
+            }),
+            "rating" => merged.sort_by(|a, b| {
+                if desc {
+                    b.rating.cmp(&a.rating)
+                } else {
+                    a.rating.cmp(&b.rating)
+                }
+            }),
+            _ => {}
+        }
     }
     if params.limit > 0 && merged.len() > params.limit as usize {
         merged.truncate(params.limit as usize);
