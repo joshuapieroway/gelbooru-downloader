@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-19
+
+Patch release: recover from swapped Rule34 credentials.
+
+### Fixed
+
+- Rule34 user ID and API key are automatically swapped when pasted into the
+  wrong fields (the user ID is numeric, the API key is a long hex string).
+- Credentials are trimmed before use, and the authentication error now
+  explains how to tell the two values apart.
+
 ## [1.1.0] - 2026-11-19
 
 Feature release: Rule34 browsing in the TUI search tab.

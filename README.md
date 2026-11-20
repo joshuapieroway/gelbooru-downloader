@@ -55,7 +55,9 @@ Rule34 browsing lives in the search tab. Add your Rule34 API credentials in
 the Settings tab (or `[rule34]` in `config.toml`), then press `s` to switch.
 Rule34 requires an API key and user ID from
 <https://rule34.xxx/index.php?page=account&s=options>; without them the
-search tab shows an authentication hint instead of results.
+search tab shows an authentication hint instead of results. The user ID is
+numeric and the API key is a long hex string; if they are pasted into the
+wrong fields the client swaps them automatically.
 
 Queries, autocomplete, paging, the viewer, quick downloads, and the
 Character/Series columns all work on Rule34. Rule34 does not expose a result

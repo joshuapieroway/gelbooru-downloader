@@ -72,6 +72,16 @@ fn parse_label_count(label: Option<&str>) -> Option<i64> {
     label[start + 1..end].trim().parse().ok()
 }
 
+/// Rule34 user IDs are numeric; API keys are long hex strings. Detect the
+/// common copy/paste mistake where the two fields are reversed.
+fn credentials_look_swapped(user_id: &str, api_key: &str) -> bool {
+    let key_is_numeric = !api_key.is_empty() && api_key.chars().all(|c| c.is_ascii_digit());
+    let user_id_is_long_hex = user_id.len() > 32
+        && user_id.chars().all(|c| c.is_ascii_hexdigit())
+        && !user_id.chars().all(|c| c.is_ascii_digit());
+    key_is_numeric && user_id_is_long_hex
+}
+
 #[derive(Clone)]
 pub struct GelbooruClient {
     http: Client,
@@ -90,7 +100,7 @@ impl GelbooruClient {
     /// Build a client for the given image board, reading that board's
     /// credentials from the config.
     pub fn new_for(config: &Config, source: Source) -> Result<Self> {
-        let (base_url, user_id, api_key) = match source {
+        let (base_url, mut user_id, mut api_key) = match source {
             Source::Gelbooru => (
                 config.api.base_url.clone(),
                 config.api.user_id.clone(),
@@ -102,6 +112,14 @@ impl GelbooruClient {
                 config.rule34.api_key.clone(),
             ),
         };
+        user_id = user_id.trim().to_string();
+        api_key = api_key.trim().to_string();
+        // Rule34's settings page shows `&api_key=...&user_id=...`, which makes
+        // it easy to paste the values into the wrong fields. The user ID is
+        // numeric and the key is a long hex string, so recover automatically.
+        if source == Source::Rule34 && credentials_look_swapped(&user_id, &api_key) {
+            std::mem::swap(&mut user_id, &mut api_key);
+        }
         Self::from_parts_for(
             source,
             base_url,
@@ -230,8 +248,8 @@ impl GelbooruClient {
         }
         if msg.to_ascii_lowercase().contains("authentication") {
             return Err(AppError::Auth(
-                "Rule34 rejected the API credentials. Check the Rule34 user ID and API key in \
-                 Settings or config.toml."
+                "Rule34 rejected the API credentials. Check the Rule34 user ID (numeric) and API \
+                 key (long hex string) in Settings or config.toml; they are easy to swap."
                     .to_string(),
             ));
         }
@@ -817,6 +835,28 @@ mod tests {
         assert_eq!(parse_label_count(Some("tag (12)")), Some(12));
         assert_eq!(parse_label_count(Some("tag")), None);
         assert_eq!(parse_label_count(None), None);
+    }
+
+    #[test]
+    fn rule34_swapped_credentials_are_recovered() {
+        let key = "0123456789abcdef".repeat(8);
+        let mut cfg = Config::default();
+        cfg.rule34.user_id = key.clone();
+        cfg.rule34.api_key = " 1234567 ".to_string();
+        let client = GelbooruClient::new_for(&cfg, Source::Rule34).unwrap();
+        assert_eq!(client.user_id, "1234567");
+        assert_eq!(client.api_key, key);
+    }
+
+    #[test]
+    fn correct_rule34_credentials_are_left_alone() {
+        let key = "0123456789abcdef".repeat(8);
+        let mut cfg = Config::default();
+        cfg.rule34.user_id = "1234567".to_string();
+        cfg.rule34.api_key = key.clone();
+        let client = GelbooruClient::new_for(&cfg, Source::Rule34).unwrap();
+        assert_eq!(client.user_id, "1234567");
+        assert_eq!(client.api_key, key);
     }
 
     #[test]

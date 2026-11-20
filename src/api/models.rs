@@ -96,7 +96,7 @@ pub struct Post {
     pub width: i64,
     #[serde(default, alias = "image_height", deserialize_with = "de_i64")]
     pub height: i64,
-    #[serde(default, deserialize_with = "de_string")]
+    #[serde(default, alias = "owner", deserialize_with = "de_string")]
     pub owner_id: String,
     #[serde(default, deserialize_with = "de_i64")]
     pub parent_id: i64,
