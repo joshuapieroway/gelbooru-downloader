@@ -235,18 +235,12 @@ impl DownloadEngine {
         queue: Option<Arc<DownloadQueue>>,
     ) -> Self {
         let concurrency = config.downloads.concurrency.max(1);
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::REFERER,
-            reqwest::header::HeaderValue::from_static("https://gelbooru.com/"),
-        );
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .pool_max_idle_per_host(concurrency)
             .pool_idle_timeout(Some(std::time::Duration::from_secs(30)))
             .tcp_keepalive(Some(std::time::Duration::from_secs(10)))
             .user_agent("gelbooru-downloader/0.1")
-            .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AppError::Http(e.to_string()))
@@ -701,10 +695,10 @@ impl DownloadEngine {
             if self.cancel.is_cancelled() {
                 return Err(AppError::Cancelled);
             }
-            let mut req = self
-                .client
-                .get(&current_url)
-                .header(reqwest::header::REFERER, "https://gelbooru.com/");
+            let mut req = self.client.get(&current_url).header(
+                reqwest::header::REFERER,
+                crate::api::referer_for_url(&current_url),
+            );
             if resume_from > 0 {
                 req = req.header(RANGE, format!("bytes={}-", resume_from));
             }

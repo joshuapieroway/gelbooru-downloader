@@ -1,6 +1,6 @@
 # Gelbooru Downloader
 
-High-performance asynchronous Gelbooru API client and image downloader built entirely in rust.
+High-performance asynchronous booru client and image downloader built entirely in rust, with Gelbooru downloads and Gelbooru/Rule34 search in the TUI.
 
 ## Build
 
@@ -44,8 +44,22 @@ or `Tab`/`←`/`→`).
   recall previous searches, `Enter` searches, `Esc` cancels.
 - Search supports `&` (AND, default), `|` (OR) and `-` (NOT) plus
   bracketed grouping: `(aisha_greyrat | norn_greyrat) mushoku_tensei`.
+- `s` switches the search tab between Gelbooru and Rule34. The current board
+  is shown in the search box and results title.
 - `n`/`p` page, `+`/`-` change page size, `v`/Enter open the viewer.
 - Bottom hints are context-aware per tab.
+
+### Rule34 search
+
+Rule34 browsing lives in the search tab. Add your Rule34 API credentials in
+the Settings tab (or `[rule34]` in `config.toml`), then press `s` to switch.
+Rule34 requires an API key and user ID from
+<https://rule34.xxx/index.php?page=account&s=options>; without them the
+search tab shows an authentication hint instead of results.
+
+Queries, autocomplete, paging, the viewer, quick downloads, and the
+Character/Series columns all work on Rule34. Rule34 does not expose a result
+count, so paging shows `Page N+` while another page may exist.
 
 In the viewer:
 
@@ -55,7 +69,7 @@ In the viewer:
 | `j` / `k` | select the previous / next tag |
 | `Enter` | open the selected tag as a new search |
 | `c` / `t` | copy post ID / tags |
-| `o` | open the post on Gelbooru |
+| `o` | open the post on its image board |
 | `d` | queue a download to the quick download directory |
 | `s` | toggle the details/tags sidebar (enlarges the image) |
 | `Esc` / `q` | close the viewer |
@@ -130,7 +144,7 @@ gelbooru queue remove <id>     # drop one row
 
 TOML config with env/CLI overrides. Run `gelbooru config --init` to create a config file. XDG directories used by default.
 
-Environment variables: `GELBOORU_BASE_URL`, `GELBOORU_USER_ID`, `GELBOORU_API_KEY`, `GELBOORU_DOWNLOAD_DIR`, `GELBOORU_QUICK_DOWNLOAD_DIR`, `GELBOORU_CONCURRENCY`.
+Environment variables: `GELBOORU_BASE_URL`, `GELBOORU_USER_ID`, `GELBOORU_API_KEY`, `GELBOORU_DOWNLOAD_DIR`, `GELBOORU_QUICK_DOWNLOAD_DIR`, `GELBOORU_CONCURRENCY`, `RULE34_BASE_URL`, `RULE34_USER_ID`, `RULE34_API_KEY`.
 
 ### Notable config options
 
@@ -145,9 +159,15 @@ filename_template = "{score}_{id}.{ext}"
 [search]
 default_rating = "all"
 page_size = 50
+default_site = "gelbooru"       # or "rule34"
 columns = ["rating", "score", "character", "series", "tags"]
+
+[rule34]
+base_url = "https://api.rule34.xxx"
+user_id = ""
+api_key = ""
 ```
 
 `search.columns` accepts: `id`, `rating`, `score`, `size`, `character`,
 `series`, `tags`, `date` (in any order). Settings are also editable live in
-the TUI Settings tab.
+the TUI Settings tab, including the Rule34 credentials.

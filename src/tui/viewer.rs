@@ -6,7 +6,7 @@
 //! alternate screen, so returning to the search results is instant and the
 //! search page/scroll position/query are preserved.
 
-use crate::api::client::GelbooruClient;
+use crate::api::client::{GelbooruClient, Source, referer_for_url};
 use crate::api::models::Post;
 use crate::config::Config;
 use crate::database::history::HistoryDb;
@@ -74,6 +74,7 @@ pub struct ViewerRequest {
     pub start: usize,
     pub db: Option<Arc<HistoryDb>>,
     pub client: Option<GelbooruClient>,
+    pub source: Source,
     pub query: String,
     pub per_page: usize,
     pub page: usize,
@@ -156,6 +157,19 @@ fn tag_type_cache() -> &'static Mutex<HashMap<String, i64>> {
     TAG_TYPE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Seed the tag-type cache from posts that already include `tag_info`
+/// (Rule34). Keeps the character/series panels instant when the viewer opens.
+fn seed_tag_types_from_posts(posts: &[Post]) {
+    let mut cache = tag_type_cache().lock().unwrap_or_else(|e| e.into_inner());
+    for post in posts {
+        for info in &post.tag_info {
+            if !info.name.is_empty() {
+                cache.insert(info.name.clone(), info.type_id());
+            }
+        }
+    }
+}
+
 /// Fetch tag types for `tags`, using the cache and filling gaps via one API call.
 async fn fetch_tag_types(client: &Option<GelbooruClient>, tags: &[String]) -> HashMap<String, i64> {
     // Start from cache.
@@ -200,6 +214,7 @@ pub async fn show(
         start,
         db,
         client,
+        source,
         query,
         per_page: search_per_page,
         page: search_page,
@@ -208,6 +223,10 @@ pub async fn show(
     if posts.is_empty() {
         return None;
     }
+
+    // Rule34 posts arrive with inline tag types; seed the cache so the
+    // character/series categories render without another API call.
+    seed_tag_types_from_posts(&posts);
 
     let mut index = start.min(posts.len() - 1);
     let mut show_sidebar = true;
@@ -283,7 +302,7 @@ pub async fn show(
                 MediaKind::Video => "Video files cannot be previewed in the terminal.".to_string(),
                 _ => "This file type cannot be previewed in the terminal.".to_string(),
             });
-            status = "Not previewable - press o to open the post on Gelbooru".to_string();
+            status = "Not previewable - press o to open the post".to_string();
         } else if cached {
             clear_images();
             phase = Phase::Ready;
@@ -471,6 +490,7 @@ pub async fn show(
                                             if new_posts.is_empty() {
                                                 status = "No previous page".to_string();
                                             } else {
+                                                seed_tag_types_from_posts(&new_posts);
                                                 // Prepend the previous page's
                                                 // posts and step one to the
                                                 // left: onto its last post.
@@ -548,6 +568,7 @@ pub async fn show(
                                                 at_end = true;
                                                 status = end_status(search_total, all_posts.len());
                                             } else {
+                                                seed_tag_types_from_posts(&new_posts);
                                                 // Append the next page's posts
                                                 // and step one to the right:
                                                 // onto its first post.
@@ -717,9 +738,9 @@ pub async fn show(
                             );
                         }
                         KeyCode::Char('o') => {
-                            match open_post(post) {
+                            match open_post(post, source) {
                                 Ok(()) => {
-                                    status = format!("Opened post #{} on Gelbooru", post.id);
+                                    status = format!("Opened post #{}", post.id);
                                 }
                                 Err(e) => status = e,
                             }
@@ -1048,7 +1069,7 @@ fn draw_image_block(f: &mut ratatui::Frame, post: &Post, phase: &Phase, area: Re
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Press o to open this post on Gelbooru",
+                "Press o to open this post in your browser",
                 Style::default().fg(MUTED),
             )));
             centered_message(f, inner, lines);
@@ -1895,7 +1916,7 @@ async fn fetch_preview_to(post: &Post, target: &Path) -> Result<(PathBuf, bool),
     for _ in 0..8 {
         let resp = client
             .get(&url)
-            .header(reqwest::header::REFERER, "https://gelbooru.com/")
+            .header(reqwest::header::REFERER, referer_for_url(&url))
             .send()
             .await
             .map_err(|e| format!("Download failed: {e}"))?;
@@ -2078,9 +2099,10 @@ fn copy_to_clipboard(text: &str) -> bool {
     false
 }
 
-fn open_post(post: &Post) -> Result<(), String> {
+fn open_post(post: &Post, source: Source) -> Result<(), String> {
     let url = format!(
-        "https://gelbooru.com/index.php?page=post&s=view&id={}",
+        "{}/index.php?page=post&s=view&id={}",
+        source.website(),
         post.id
     );
     Command::new("xdg-open")

@@ -32,6 +32,30 @@ impl Default for ApiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Rule34Config {
+    #[serde(default = "default_rule34_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+fn default_rule34_base_url() -> String {
+    "https://api.rule34.xxx".to_string()
+}
+
+impl Default for Rule34Config {
+    fn default() -> Self {
+        Self {
+            base_url: default_rule34_base_url(),
+            user_id: String::new(),
+            api_key: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadsConfig {
     #[serde(default = "default_dir")]
     pub directory: String,
@@ -103,6 +127,9 @@ pub struct SearchConfig {
     pub default_limit: u32,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
+    /// Image board selected when the TUI opens: `gelbooru` or `rule34`.
+    #[serde(default = "default_site")]
+    pub default_site: String,
     /// Columns shown in the TUI search results, in order. Valid values:
     /// id, rating, score, size, character, series, tags, date.
     #[serde(default = "default_search_columns")]
@@ -117,6 +144,9 @@ fn default_limit() -> u32 {
 }
 fn default_page_size() -> u32 {
     100
+}
+fn default_site() -> String {
+    "gelbooru".to_string()
 }
 
 fn default_search_columns() -> Vec<String> {
@@ -135,6 +165,7 @@ impl Default for SearchConfig {
             default_rating: default_rating(),
             default_limit: default_limit(),
             page_size: default_page_size(),
+            default_site: default_site(),
             columns: default_search_columns(),
         }
     }
@@ -177,6 +208,8 @@ pub struct Config {
     pub downloads: DownloadsConfig,
     #[serde(default)]
     pub search: SearchConfig,
+    #[serde(default)]
+    pub rule34: Rule34Config,
     #[serde(default)]
     pub watch: WatchConfig,
     #[serde(default)]
@@ -277,6 +310,15 @@ impl Config {
         if let Ok(v) = std::env::var("GELBOORU_API_KEY") {
             self.api.api_key = v;
         }
+        if let Ok(v) = std::env::var("RULE34_BASE_URL") {
+            self.rule34.base_url = v;
+        }
+        if let Ok(v) = std::env::var("RULE34_USER_ID") {
+            self.rule34.user_id = v;
+        }
+        if let Ok(v) = std::env::var("RULE34_API_KEY") {
+            self.rule34.api_key = v;
+        }
         if let Ok(v) = std::env::var("GELBOORU_DOWNLOAD_DIR") {
             self.downloads.directory = v;
         }
@@ -329,10 +371,35 @@ mod tests {
     fn new_fields_have_sensible_defaults() {
         let cfg = Config::default();
         assert!(cfg.search.columns == vec!["rating", "score", "character", "series", "tags"]);
+        assert_eq!(cfg.search.default_site, "gelbooru");
+        assert_eq!(cfg.rule34.base_url, "https://api.rule34.xxx");
+        assert!(cfg.rule34.user_id.is_empty());
+        assert!(cfg.rule34.api_key.is_empty());
         assert!(cfg.downloads.quick_download_directory.is_none());
         assert!(!cfg.downloads.character_include_series);
         assert!(cfg.downloads.folder_template.is_empty());
         assert!(cfg.downloads.bandwidth_limit.is_none());
+    }
+
+    #[test]
+    fn partial_rule34_section_keeps_defaults() {
+        let cfg: Config = toml::from_str("[rule34]\nuser_id = \"42\"\n").unwrap();
+        assert_eq!(cfg.rule34.user_id, "42");
+        assert!(cfg.rule34.api_key.is_empty());
+        assert_eq!(cfg.rule34.base_url, "https://api.rule34.xxx");
+    }
+
+    #[test]
+    fn rule34_credentials_round_trip() {
+        let mut cfg = Config::default();
+        cfg.rule34.user_id = "123".to_string();
+        cfg.rule34.api_key = "secret".to_string();
+        cfg.search.default_site = "rule34".to_string();
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let parsed: Config = toml::from_str(&s).unwrap();
+        assert_eq!(parsed.rule34.user_id, "123");
+        assert_eq!(parsed.rule34.api_key, "secret");
+        assert_eq!(parsed.search.default_site, "rule34");
     }
 
     #[test]
@@ -414,14 +481,20 @@ mod tests {
         let mut cfg = Config::default();
         unsafe {
             std::env::set_var("GELBOORU_QUICK_DOWNLOAD_DIR", "/tmp/env-qd");
+            std::env::set_var("RULE34_USER_ID", "env-user");
+            std::env::set_var("RULE34_API_KEY", "env-key");
         }
         cfg.apply_env();
         assert_eq!(
             cfg.downloads.quick_download_directory.as_deref(),
             Some("/tmp/env-qd")
         );
+        assert_eq!(cfg.rule34.user_id, "env-user");
+        assert_eq!(cfg.rule34.api_key, "env-key");
         unsafe {
             std::env::remove_var("GELBOORU_QUICK_DOWNLOAD_DIR");
+            std::env::remove_var("RULE34_USER_ID");
+            std::env::remove_var("RULE34_API_KEY");
         }
     }
 }

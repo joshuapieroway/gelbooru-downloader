@@ -12,6 +12,8 @@ pub enum AppError {
     Database(String),
     #[error("Configuration error: {0}")]
     Config(String),
+    #[error("Authentication error: {0}")]
+    Auth(String),
     #[error("Validation error: {0}")]
     Validation(String),
     #[error("Not found: {0}")]

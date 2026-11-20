@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-19
+
+Feature release: Rule34 browsing in the TUI search tab.
+
+### Added
+
+- Rule34 search in the TUI search tab. Press `s` to switch between Gelbooru
+  and Rule34; the active board is shown in the search box and results title.
+- `[rule34]` config section with `base_url`, `user_id`, and `api_key`, plus
+  `RULE34_BASE_URL`, `RULE34_USER_ID`, and `RULE34_API_KEY` environment
+  overrides.
+- `search.default_site` (`gelbooru` or `rule34`) selects the starting board.
+- Rule34 credentials are editable in the TUI Settings tab alongside the
+  Gelbooru ones.
+- Rule34 autocomplete, paging, character/series tag categorisation, viewer
+  support, and quick downloads.
+- Helpful authentication errors when Rule34 credentials are missing or
+  rejected.
+
+### Fixed
+
+- Character/Series search columns now actually read the tag types fetched for
+  the current page instead of discarding them.
+
 ## [1.0.3] - 2026-11-15
 
 Patch release: sort metatags applied to merged results.

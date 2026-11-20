@@ -1,4 +1,4 @@
-use crate::api::client::GelbooruClient;
+use crate::api::client::{GelbooruClient, Source};
 use crate::api::models::Post;
 use crate::config::Config;
 use crate::database::history::HistoryDb;
@@ -162,6 +162,26 @@ fn settings_items(cfg: &Config) -> Vec<(String, String, &'static str)> {
             cfg.api.api_key.clone(),
             "api.api_key",
         ),
+        (
+            "Default search site".to_string(),
+            cfg.search.default_site.clone(),
+            "search.default_site",
+        ),
+        (
+            "Rule34 base URL".to_string(),
+            cfg.rule34.base_url.clone(),
+            "rule34.base_url",
+        ),
+        (
+            "Rule34 user ID".to_string(),
+            cfg.rule34.user_id.clone(),
+            "rule34.user_id",
+        ),
+        (
+            "Rule34 API key".to_string(),
+            cfg.rule34.api_key.clone(),
+            "rule34.api_key",
+        ),
     ]
 }
 
@@ -207,6 +227,12 @@ fn apply_setting(cfg: &mut Config, key: &str, value: &str) {
         "api.base_url" => cfg.api.base_url = value.to_string(),
         "api.user_id" => cfg.api.user_id = value.to_string(),
         "api.api_key" => cfg.api.api_key = value.to_string(),
+        "search.default_site" => {
+            cfg.search.default_site = Source::from_name(value).as_str().to_string()
+        }
+        "rule34.base_url" => cfg.rule34.base_url = value.to_string(),
+        "rule34.user_id" => cfg.rule34.user_id = value.to_string(),
+        "rule34.api_key" => cfg.rule34.api_key = value.to_string(),
         _ => {}
     }
 }
@@ -221,6 +247,9 @@ struct AppState {
     tick: u64,
     db: Option<Arc<HistoryDb>>,
     client: Option<GelbooruClient>,
+    /// Image board used by the search tab. Switching rebuilds `client` from
+    /// the matching config section.
+    source: Source,
     cfg: Config,
     config_path: Option<std::path::PathBuf>,
     settings_selected: usize,
@@ -236,6 +265,9 @@ struct AppState {
     search_page: usize,
     search_per_page: usize,
     search_total: i64,
+    /// True when the current page filled up, meaning another page may exist.
+    /// Used for boards (Rule34) that do not report a total count.
+    search_has_more: bool,
     /// Columns to display in the search results, in order.
     search_columns: Vec<String>,
     /// Autocomplete suggestions for the current search input (tag, post count).
@@ -267,6 +299,7 @@ impl AppState {
     fn new(
         db: Option<Arc<HistoryDb>>,
         client: Option<GelbooruClient>,
+        source: Source,
         cfg: Config,
         config_path: Option<std::path::PathBuf>,
         columns: Vec<String>,
@@ -281,6 +314,7 @@ impl AppState {
             tick: 0,
             db,
             client,
+            source,
             cfg,
             config_path,
             settings_selected: 0,
@@ -296,6 +330,7 @@ impl AppState {
             search_page: 1,
             search_per_page: 50,
             search_total: 0,
+            search_has_more: false,
             search_columns: if columns.is_empty() {
                 vec![
                     "rating".into(),
@@ -469,6 +504,7 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
         let mut fetch_err: Option<String> = None;
         let mut merged: Vec<crate::api::models::Post> = Vec::new();
         let mut total = 0i64;
+        let mut fetched_raw = 0usize;
 
         if complex {
             let mut params = crate::api::search::SearchParams::new(query.clone());
@@ -481,6 +517,7 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
             match crate::api::search::search_expr(&client, &cfg, &params).await {
                 Ok(posts) => {
                     total = posts.len() as i64;
+                    fetched_raw = posts.len();
                     for p in posts {
                         if !p.extension().eq_ignore_ascii_case("mp4") {
                             merged.push(p);
@@ -498,6 +535,7 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
                 {
                     Ok((posts, t)) => {
                         total = t;
+                        fetched_raw = posts.len();
                         for p in posts {
                             if !p.extension().eq_ignore_ascii_case("mp4") {
                                 merged.push(p);
@@ -509,17 +547,50 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
             }
         }
 
-        // Fetch tag types for the merged page.
+        // Collect tag types for the merged page. Rule34 returns them inline
+        // via `fields=tag_info`; Gelbooru needs a follow-up tag lookup. Only
+        // tags that are not already cached are requested.
         if fetch_err.is_none() && !merged.is_empty() {
-            let mut unique: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for p in &merged {
-                for t in p.tag_list() {
-                    unique.insert(t);
+            let mut missing: Vec<String> = Vec::new();
+            {
+                let mut cache = app_tag_type_cache()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                for p in &merged {
+                    for ti in &p.tag_info {
+                        if !ti.name.is_empty() {
+                            cache.insert(ti.name.clone(), ti.type_id());
+                        }
+                    }
+                }
+                let mut seen: HashSet<String> = HashSet::new();
+                for p in &merged {
+                    for t in p.tag_list() {
+                        if seen.insert(t.clone()) && !cache.contains_key(&t) {
+                            missing.push(t);
+                        }
+                    }
                 }
             }
-            let unique: Vec<String> = unique.into_iter().collect();
-            let _ = client.tags_by_names(&unique).await;
+            if !missing.is_empty() {
+                if let Ok(fetched) = client.tags_by_names(&missing).await {
+                    let mut cache = app_tag_type_cache()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    for (name, ty) in fetched {
+                        cache.insert(name, ty);
+                    }
+                }
+            }
         }
+
+        let has_more = if complex {
+            false
+        } else if total > 0 {
+            (page as i64) * (per_page as i64) < total
+        } else {
+            fetched_raw >= per_page
+        };
 
         let mut st = safe_lock(&state);
         if st.search_seq != seq {
@@ -529,10 +600,12 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
         if let Some(e) = fetch_err {
             st.results.clear();
             st.search_total = 0;
+            st.search_has_more = false;
             st.search_error = Some(e);
         } else {
             st.results = merged;
             st.search_total = total;
+            st.search_has_more = has_more;
             st.search_page = page;
             st.clamp_search_scroll();
             st.search_error = if st.results.is_empty() {
@@ -546,6 +619,18 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
 
 fn total_search_pages(total: i64, per_page: usize) -> usize {
     ((total.max(0) as usize + per_page.max(1) - 1) / per_page.max(1)).max(1)
+}
+
+/// Human-readable page indicator. Boards without a result count (Rule34) show
+/// `Page N+` while another full page may exist.
+fn search_pages_label(total: i64, per_page: usize, page: usize, has_more: bool) -> String {
+    if total > 0 {
+        format!("Page {}/{}", page, total_search_pages(total, per_page))
+    } else if has_more {
+        format!("Page {}+", page)
+    } else {
+        format!("Page {}", page)
+    }
 }
 
 /// Extract the last whitespace-delimited token of a query (the one being typed).
@@ -886,9 +971,23 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                         });
                         let _ = st.cfg.save(Some(&path));
                         st.search_columns = st.cfg.search_columns();
-                        // Rebuild API client if credentials changed.
-                        if key.starts_with("api.") {
-                            st.client = GelbooruClient::new(&st.cfg).ok();
+                        // Rebuild the active client if credentials changed.
+                        if key.starts_with("api.") || key.starts_with("rule34.") {
+                            st.client = GelbooruClient::new_for(&st.cfg, st.source).ok();
+                        }
+                        // Changing the default site takes effect immediately.
+                        if key == "search.default_site" {
+                            let source = Source::from_name(&st.cfg.search.default_site);
+                            if source != st.source {
+                                st.source = source;
+                                st.client = GelbooruClient::new_for(&st.cfg, st.source).ok();
+                                st.results.clear();
+                                st.search_error = None;
+                                st.search_total = 0;
+                                st.search_has_more = false;
+                                st.search_page = 1;
+                                st.scroll = 0;
+                            }
                         }
                         st.settings_status = format!("Saved {}", key);
                     }
@@ -962,6 +1061,25 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                 }
                 UiAction::None
             }
+            KeyCode::Char('s') if st.tab == 0 => {
+                // Switch the search tab between the supported image boards.
+                st.source = st.source.toggle();
+                st.client = GelbooruClient::new_for(&st.cfg, st.source).ok();
+                st.results.clear();
+                st.search_error = None;
+                st.search_total = 0;
+                st.search_has_more = false;
+                st.search_page = 1;
+                st.scroll = 0;
+                st.suggestions.clear();
+                st.suggestion_selected = None;
+                st.suggest_scroll = 0;
+                st.suggest_seq = st.suggest_seq.wrapping_add(1);
+                if !st.query.trim().is_empty() {
+                    return UiAction::Search(1);
+                }
+                UiAction::None
+            }
             KeyCode::Char('1') => {
                 st.tab = 0;
                 st.scroll = 0;
@@ -988,11 +1106,8 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                 UiAction::None
             }
             KeyCode::Char('n') => {
-                if st.tab == 0 && !st.results.is_empty() {
-                    let pages = total_search_pages(st.search_total, st.search_per_page);
-                    if st.search_page < pages {
-                        return UiAction::Search(st.search_page + 1);
-                    }
+                if st.tab == 0 && !st.results.is_empty() && st.search_has_more {
+                    return UiAction::Search(st.search_page + 1);
                 }
                 UiAction::None
             }
@@ -1036,6 +1151,7 @@ fn handle_key(st: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> UiAc
                     start: st.scroll.min(st.results.len().saturating_sub(1)),
                     db: st.db.clone(),
                     client: st.client.clone(),
+                    source: st.source,
                     query: st.query.clone(),
                     per_page: st.search_per_page,
                     page: st.search_page,
@@ -1053,7 +1169,8 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
     } else {
         None
     };
-    let client = GelbooruClient::new(&cfg).ok();
+    let source = Source::from_name(&cfg.search.default_site);
+    let client = GelbooruClient::new_for(&cfg, source).ok();
     // Pick up downloads interrupted by a previous run without delaying the
     // first frame; progress shows up in the Queue tab like any other job.
     if let Some(db) = db.clone() {
@@ -1077,6 +1194,7 @@ pub async fn run_tui(cfg: Config) -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(AppState::new(
         db,
         client,
+        source,
         cfg.clone(),
         None,
         cfg.search_columns(),
@@ -1256,7 +1374,7 @@ fn draw(f: &mut ratatui::Frame, app: &AppState) {
         let help = match app.mode {
             Mode::Normal => {
                 if app.tab == 0 {
-                    "Tab/←→ view  1-4 select  ↑↓ scroll  / search  v view  q quit"
+                    "Tab/←→ view  1-5 tabs  ↑↓ scroll  / search  s site  v view  q quit"
                 } else {
                     "Tab/←→ view  1-5 select  q quit"
                 }
@@ -1385,10 +1503,15 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .title(format!(
-                        "Search Results ({})  Page {}/{}  Per page {}",
+                        "Search Results - {} ({})  {}  Per page {}",
+                        app.source.label(),
                         app.results.len(),
-                        app.search_page,
-                        total_search_pages(app.search_total, app.search_per_page),
+                        search_pages_label(
+                            app.search_total,
+                            app.search_per_page,
+                            app.search_page,
+                            app.search_has_more
+                        ),
                         app.search_per_page
                     ))
                     .border_style(Style::default().fg(C_MUTED)),
@@ -1441,10 +1564,15 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .title(format!(
-                        "Search Results ({})  Page {}/{}  Per page {}",
+                        "Search Results - {} ({})  {}  Per page {}",
+                        app.source.label(),
                         app.results.len(),
-                        app.search_page,
-                        total_search_pages(app.search_total, app.search_per_page),
+                        search_pages_label(
+                            app.search_total,
+                            app.search_per_page,
+                            app.search_page,
+                            app.search_has_more
+                        ),
                         app.search_per_page
                     ))
                     .border_style(Style::default().fg(C_MUTED)),
@@ -1518,6 +1646,10 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     };
     let input = Paragraph::new(Line::from(vec![
         Span::styled(
+            format!("[{}] ", app.source.label()),
+            Style::default().fg(C_OK).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
             "Query: ",
             Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
         ),
@@ -1535,7 +1667,7 @@ fn draw_search(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title("Search")
+            .title(format!("Search - {} (s switches site)", app.source.label()))
             .border_style(Style::default().fg(C_MUTED)),
     );
     f.render_widget(input, chunks[2]);
@@ -1903,8 +2035,33 @@ mod tests {
     }
 
     #[test]
+    fn page_label_handles_unknown_totals() {
+        assert_eq!(search_pages_label(440, 50, 2, true), "Page 2/9");
+        assert_eq!(search_pages_label(0, 50, 3, true), "Page 3+");
+        assert_eq!(search_pages_label(0, 50, 3, false), "Page 3");
+    }
+
+    #[test]
+    fn settings_store_rule34_credentials_and_site() {
+        let mut cfg = Config::default();
+        apply_setting(&mut cfg, "rule34.user_id", "42");
+        apply_setting(&mut cfg, "rule34.api_key", "secret");
+        apply_setting(&mut cfg, "search.default_site", "Rule34");
+        assert_eq!(cfg.rule34.user_id, "42");
+        assert_eq!(cfg.rule34.api_key, "secret");
+        assert_eq!(cfg.search.default_site, "rule34");
+    }
+
+    #[test]
     fn same_tag_with_different_ratings_stays_separate_in_queue() {
-        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
+        let mut app = AppState::new(
+            None,
+            None,
+            Source::Gelbooru,
+            Config::default(),
+            None,
+            Vec::new(),
+        );
         app.update_jobs(
             vec![
                 snapshot("a", "general,sensitive", "/out/safe", 10, 2, 100),
@@ -1927,7 +2084,14 @@ mod tests {
 
     #[test]
     fn same_tag_and_rating_with_different_outputs_stays_separate_in_queue() {
-        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
+        let mut app = AppState::new(
+            None,
+            None,
+            Source::Gelbooru,
+            Config::default(),
+            None,
+            Vec::new(),
+        );
         app.update_jobs(
             vec![
                 snapshot("a", "general", "/out/safe", 10, 1, 0),
@@ -1945,7 +2109,14 @@ mod tests {
 
     #[test]
     fn per_job_speed_and_eta_come_from_the_previous_poll() {
-        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
+        let mut app = AppState::new(
+            None,
+            None,
+            Source::Gelbooru,
+            Config::default(),
+            None,
+            Vec::new(),
+        );
         let start = Instant::now();
         app.update_jobs(vec![snapshot("a", "general", "/out", 10, 0, 0)], start);
 
@@ -1964,7 +2135,14 @@ mod tests {
 
     #[test]
     fn finished_jobs_are_removed_from_the_queue() {
-        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
+        let mut app = AppState::new(
+            None,
+            None,
+            Source::Gelbooru,
+            Config::default(),
+            None,
+            Vec::new(),
+        );
         let now = Instant::now();
         app.update_jobs(
             vec![
@@ -1997,11 +2175,48 @@ mod tests {
     }
 
     #[test]
+    fn search_tab_shows_the_selected_image_board() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = AppState::new(
+            None,
+            None,
+            Source::Rule34,
+            Config::default(),
+            None,
+            Vec::new(),
+        );
+        app.query = "aisha".to_string();
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("[Rule34]"), "{rendered}");
+        assert!(rendered.contains("s switches site"), "{rendered}");
+    }
+
+    #[test]
     fn queue_renders_one_row_per_concurrent_job() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
+        let mut app = AppState::new(
+            None,
+            None,
+            Source::Gelbooru,
+            Config::default(),
+            None,
+            Vec::new(),
+        );
         app.update_jobs(
             vec![
                 snapshot("a", "general,sensitive", "/out/safe", 10, 2, 100),
@@ -2038,7 +2253,14 @@ mod tests {
 
     #[test]
     fn search_scroll_cannot_pass_the_last_result() {
-        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
+        let mut app = AppState::new(
+            None,
+            None,
+            Source::Gelbooru,
+            Config::default(),
+            None,
+            Vec::new(),
+        );
         app.results = vec![Post::default(), Post::default(), Post::default()];
         app.scroll = 99;
 
@@ -2049,7 +2271,14 @@ mod tests {
 
     #[test]
     fn search_scroll_is_zero_when_there_are_no_results() {
-        let mut app = AppState::new(None, None, Config::default(), None, Vec::new());
+        let mut app = AppState::new(
+            None,
+            None,
+            Source::Gelbooru,
+            Config::default(),
+            None,
+            Vec::new(),
+        );
         app.scroll = 7;
 
         app.clamp_search_scroll();
