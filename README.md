@@ -42,7 +42,7 @@ or `Tab`/`←`/`→`).
 - `/` opens the search input. Type a query; tag suggestions appear ranked by
   post count. `Tab` accepts a suggestion, `↑`/`↓` navigate suggestions or
   recall previous searches, `Enter` searches, `Esc` cancels.
-- Search supports `&` (AND, default), `|` (OR) and `-` (NOT) plus
+- Search treats whitespace as AND and supports `|` (OR) and `-` (NOT) plus
   bracketed grouping: `(aisha_greyrat | norn_greyrat) mushoku_tensei`.
 - `s` switches the search tab between Gelbooru and Rule34. The current board
   is shown in the search box and results title.
