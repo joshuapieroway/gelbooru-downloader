@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-20
+
+Feature release: scrollable previews for very tall images.
+
+### Added
+
+- Comic strips and webtoons are now previewed at the full width of the image
+  frame instead of being shrunk to fit its height.
+- Tall previews are paged vertically with `↑`/`↓`, `PgUp`/`PgDn`,
+  `Home`/`End`, or the mouse wheel. The footer shows the current screen
+  (`↑/↓ scroll Screen 3/17`).
+- Slices are generated on demand with ImageMagick (`magick` or `convert`) and
+  cached in the temporary directory. Without ImageMagick the viewer falls back
+  to the previous fit-inside-the-frame preview.
+
 ## [1.1.1] - 2026-11-19
 
 Patch release: recover from swapped Rule34 credentials.

@@ -68,6 +68,8 @@ In the viewer:
 | Key | Action |
 | --- | --- |
 | `←` / `→` | previous / next post |
+| `↑` / `↓` (or mouse wheel) | scroll a tall image screen by screen; otherwise move through tags |
+| `PgUp` / `PgDn`, `Home` / `End` | jump through a tall image, or move through tags |
 | `j` / `k` | select the previous / next tag |
 | `Enter` | open the selected tag as a new search |
 | `c` / `t` | copy post ID / tags |
@@ -75,6 +77,12 @@ In the viewer:
 | `d` | queue a download to the quick download directory |
 | `s` | toggle the details/tags sidebar (enlarges the image) |
 | `Esc` / `q` | close the viewer |
+
+Very tall images, such as comic strips and webtoons, are shown at the full
+width of the preview frame instead of being shrunk to fit its height. Scroll
+through them one screenful at a time with `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`,
+or the mouse wheel. Slicing uses ImageMagick (`magick` or `convert`); without
+it, tall images fall back to the normal fit-inside-the-frame preview.
 
 Quick downloads go to a dedicated subfolder (configurable via
 `downloads.quick_download_directory`, default

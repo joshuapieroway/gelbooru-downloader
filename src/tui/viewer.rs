@@ -5,6 +5,9 @@
 //! full-resolution image inside the image frame.  Everything stays on the same
 //! alternate screen, so returning to the search results is instant and the
 //! search page/scroll position/query are preserved.
+//!
+//! Very tall images (comic strips) are sliced into screenfuls with ImageMagick
+//! so they can be read at full width and scrolled vertically.
 
 use crate::api::client::{GelbooruClient, Source, referer_for_url};
 use crate::api::models::Post;
@@ -273,6 +276,9 @@ pub async fn show(
         #[allow(unused_assignments)]
         let mut status = String::new();
         let mut preview: Option<PathBuf> = None;
+        // Which screenful of a very tall image (comic strip) is visible.
+        // Reset for every post; tall images are paged top-to-bottom.
+        let mut img_scroll = 0usize;
 
         // Collect finished quick downloads. The queue itself is updated by the
         // engine; the handles only provide the final outcome for the status
@@ -362,8 +368,27 @@ pub async fn show(
             show_sidebar,
         );
 
+        // Tall images (comic strips) are shown at full width one screenful at
+        // a time instead of being shrunk to fit the height. Add the scroll
+        // hint before placing the first slice.
+        if let (Phase::Ready, Some(_)) = (&phase, &preview) {
+            if let Some(total) = tall_slices(post, last_img_rect) {
+                status = image_scroll_status(&status, img_scroll, total);
+                last_img_rect = draw(
+                    terminal,
+                    &all_posts,
+                    index,
+                    &phase,
+                    &mut tag_state,
+                    &status,
+                    &downloads_summary,
+                    show_sidebar,
+                );
+            }
+        }
+
         if let (Phase::Ready, Some(path)) = (&phase, &preview) {
-            if let Err(e) = place_image(post, path, last_img_rect) {
+            if let Err(e) = place_image(post, path, last_img_rect, img_scroll) {
                 clear_images();
                 phase = Phase::Error(e);
                 status = "Preview could not be displayed".to_string();
@@ -623,7 +648,78 @@ pub async fn show(
                                 );
                             }
                         }
-                        KeyCode::Up | KeyCode::Char('k') => {
+                        KeyCode::Up | KeyCode::PageUp => {
+                            if let Some(total) = tall_slices(post, last_img_rect) {
+                                if img_scroll > 0 {
+                                    img_scroll -= 1;
+                                    status = image_scroll_status(&status, img_scroll, total);
+                                    clear_images();
+                                    last_img_rect = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        &mut tag_state,
+                                        &status,
+                                        &downloads_summary,
+                                        show_sidebar,
+                                    );
+                                    if let (Phase::Ready, Some(path)) = (&phase, &preview) {
+                                        let _ = place_image(post, path, last_img_rect, img_scroll);
+                                    }
+                                }
+                                continue;
+                            }
+                            let step = if k.code == KeyCode::PageUp { 6 } else { 1 };
+                            tag_state.select_previous(tag_count, step);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                &mut tag_state,
+                                &status,
+                                &downloads_summary,
+                                show_sidebar,
+                            );
+                        }
+                        KeyCode::Down | KeyCode::PageDown => {
+                            if let Some(total) = tall_slices(post, last_img_rect) {
+                                let next = (img_scroll + 1).min(total.saturating_sub(1));
+                                if next != img_scroll {
+                                    img_scroll = next;
+                                    status = image_scroll_status(&status, img_scroll, total);
+                                    clear_images();
+                                    last_img_rect = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        &mut tag_state,
+                                        &status,
+                                        &downloads_summary,
+                                        show_sidebar,
+                                    );
+                                    if let (Phase::Ready, Some(path)) = (&phase, &preview) {
+                                        let _ = place_image(post, path, last_img_rect, img_scroll);
+                                    }
+                                }
+                                continue;
+                            }
+                            let step = if k.code == KeyCode::PageDown { 6 } else { 1 };
+                            tag_state.select_next(tag_count, step);
+                            let _ = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                &mut tag_state,
+                                &status,
+                                &downloads_summary,
+                                show_sidebar,
+                            );
+                        }
+                        KeyCode::Char('k') => {
                             tag_state.select_previous(tag_count, 1);
                             let _ = draw(
                                 terminal,
@@ -636,7 +732,7 @@ pub async fn show(
                                 show_sidebar,
                             );
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
+                        KeyCode::Char('j') => {
                             tag_state.select_next(tag_count, 1);
                             let _ = draw(
                                 terminal,
@@ -649,33 +745,28 @@ pub async fn show(
                                 show_sidebar,
                             );
                         }
-                        KeyCode::PageUp => {
-                            tag_state.select_previous(tag_count, 6);
-                            let _ = draw(
-                                terminal,
-                                &all_posts,
-                                index,
-                                &phase,
-                                &mut tag_state,
-                                &status,
-                                &downloads_summary,
-                                show_sidebar,
-                            );
-                        }
-                        KeyCode::PageDown => {
-                            tag_state.select_next(tag_count, 6);
-                            let _ = draw(
-                                terminal,
-                                &all_posts,
-                                index,
-                                &phase,
-                                &mut tag_state,
-                                &status,
-                                &downloads_summary,
-                                show_sidebar,
-                            );
-                        }
                         KeyCode::Home => {
+                            if let Some(total) = tall_slices(post, last_img_rect) {
+                                if img_scroll != 0 {
+                                    img_scroll = 0;
+                                    status = image_scroll_status(&status, img_scroll, total);
+                                    clear_images();
+                                    last_img_rect = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        &mut tag_state,
+                                        &status,
+                                        &downloads_summary,
+                                        show_sidebar,
+                                    );
+                                    if let (Phase::Ready, Some(path)) = (&phase, &preview) {
+                                        let _ = place_image(post, path, last_img_rect, img_scroll);
+                                    }
+                                }
+                                continue;
+                            }
                             tag_state.select_first();
                             let _ = draw(
                                 terminal,
@@ -689,6 +780,28 @@ pub async fn show(
                             );
                         }
                         KeyCode::End => {
+                            if let Some(total) = tall_slices(post, last_img_rect) {
+                                let next = total.saturating_sub(1);
+                                if img_scroll != next {
+                                    img_scroll = next;
+                                    status = image_scroll_status(&status, img_scroll, total);
+                                    clear_images();
+                                    last_img_rect = draw(
+                                        terminal,
+                                        &all_posts,
+                                        index,
+                                        &phase,
+                                        &mut tag_state,
+                                        &status,
+                                        &downloads_summary,
+                                        show_sidebar,
+                                    );
+                                    if let (Phase::Ready, Some(path)) = (&phase, &preview) {
+                                        let _ = place_image(post, path, last_img_rect, img_scroll);
+                                    }
+                                }
+                                continue;
+                            }
                             tag_state.select_last(tag_count);
                             let _ = draw(
                                 terminal,
@@ -773,8 +886,22 @@ pub async fn show(
                                 &downloads_summary,
                                 show_sidebar,
                             );
+                            let before = status.clone();
+                            refresh_image_scroll(&mut status, &mut img_scroll, post, last_img_rect);
+                            if status != before {
+                                last_img_rect = draw(
+                                    terminal,
+                                    &all_posts,
+                                    index,
+                                    &phase,
+                                    &mut tag_state,
+                                    &status,
+                                    &downloads_summary,
+                                    show_sidebar,
+                                );
+                            }
                             if let (Phase::Ready, Some(path)) = (&phase, &preview) {
-                                let _ = place_image(post, path, last_img_rect);
+                                let _ = place_image(post, path, last_img_rect, img_scroll);
                             }
                         }
                         KeyCode::Char('d') => {
@@ -818,29 +945,58 @@ pub async fn show(
                     }
                 }
                 Event::Mouse(m) => {
-                    let moved = match m.kind {
-                        MouseEventKind::ScrollUp => {
-                            tag_state.select_previous(tag_count, 3);
-                            true
-                        }
-                        MouseEventKind::ScrollDown => {
-                            tag_state.select_next(tag_count, 3);
-                            true
-                        }
-                        _ => false,
+                    let delta = match m.kind {
+                        MouseEventKind::ScrollUp => -1i32,
+                        MouseEventKind::ScrollDown => 1i32,
+                        _ => 0,
                     };
-                    if moved {
-                        let _ = draw(
-                            terminal,
-                            &all_posts,
-                            index,
-                            &phase,
-                            &mut tag_state,
-                            &status,
-                            &downloads_summary,
-                            show_sidebar,
-                        );
+                    if delta == 0 {
+                        continue;
                     }
+                    // The wheel scrolls a tall comic strip before it touches
+                    // the tag list, so long images can be read without leaving
+                    // the keyboard.
+                    if let Some(total) = tall_slices(post, last_img_rect) {
+                        let next = if delta < 0 {
+                            img_scroll.saturating_sub(1)
+                        } else {
+                            (img_scroll + 1).min(total.saturating_sub(1))
+                        };
+                        if next != img_scroll {
+                            img_scroll = next;
+                            status = image_scroll_status(&status, img_scroll, total);
+                            clear_images();
+                            last_img_rect = draw(
+                                terminal,
+                                &all_posts,
+                                index,
+                                &phase,
+                                &mut tag_state,
+                                &status,
+                                &downloads_summary,
+                                show_sidebar,
+                            );
+                            if let (Phase::Ready, Some(path)) = (&phase, &preview) {
+                                let _ = place_image(post, path, last_img_rect, img_scroll);
+                            }
+                        }
+                        continue;
+                    }
+                    if delta < 0 {
+                        tag_state.select_previous(tag_count, 3);
+                    } else {
+                        tag_state.select_next(tag_count, 3);
+                    }
+                    let _ = draw(
+                        terminal,
+                        &all_posts,
+                        index,
+                        &phase,
+                        &mut tag_state,
+                        &status,
+                        &downloads_summary,
+                        show_sidebar,
+                    );
                 }
                 Event::Resize(_, _) => {
                     clear_images();
@@ -854,8 +1010,22 @@ pub async fn show(
                         &downloads_summary,
                         show_sidebar,
                     );
+                    let before = status.clone();
+                    refresh_image_scroll(&mut status, &mut img_scroll, post, last_img_rect);
+                    if status != before {
+                        last_img_rect = draw(
+                            terminal,
+                            &all_posts,
+                            index,
+                            &phase,
+                            &mut tag_state,
+                            &status,
+                            &downloads_summary,
+                            show_sidebar,
+                        );
+                    }
                     if let (Phase::Ready, Some(path)) = (&phase, &preview) {
-                        let _ = place_image(post, path, last_img_rect);
+                        let _ = place_image(post, path, last_img_rect, img_scroll);
                     }
                 }
                 _ => {}
@@ -1789,17 +1959,213 @@ fn quick_download_status(outcome: &DownloadOutcome) -> String {
     )
 }
 
+/// Size of one terminal cell in pixels. Kitty reports real pixel dimensions
+/// through the window-size ioctl; other terminals may only report zeros, in
+/// which case a typical 1:2 cell is assumed.
+fn cell_pixels() -> (f32, f32) {
+    if let Ok(ws) = crossterm::terminal::window_size() {
+        if ws.columns > 0 && ws.rows > 0 && ws.width > 0 && ws.height > 0 {
+            return (
+                (ws.width as f32 / ws.columns as f32).max(1.0),
+                (ws.height as f32 / ws.rows as f32).max(1.0),
+            );
+        }
+    }
+    (8.0, 16.0)
+}
+
+/// Number of screenfuls a width-fitted image would occupy, or `None` when it
+/// already fits inside the viewport. Pure so the layout decision is testable.
+fn tall_screens_for(
+    image_w: i64,
+    image_h: i64,
+    rect_w: u16,
+    rect_h: u16,
+    cell_w: f32,
+    cell_h: f32,
+) -> Option<usize> {
+    if image_w <= 0 || image_h <= 0 || rect_w < 2 || rect_h < 2 {
+        return None;
+    }
+    let view_w = rect_w as f32 * cell_w;
+    let view_h = rect_h as f32 * cell_h;
+    let height_at_full_width = view_w * image_h as f32 / image_w as f32;
+    // Leave a tiny tolerance so a normal portrait image that is off by a
+    // rounding pixel is not turned into two screens.
+    if height_at_full_width <= view_h * 1.01 {
+        return None;
+    }
+    Some((height_at_full_width / view_h).ceil().max(1.0) as usize)
+}
+
+/// How many vertical screenfuls this post needs, if it is taller than the
+/// image viewport when scaled to the viewport width.
+fn tall_slices(post: &Post, rect: Rect) -> Option<usize> {
+    // Animated GIFs and videos keep their existing single-frame/fit behaviour.
+    if media_kind(post) != MediaKind::Image {
+        return None;
+    }
+    // Without ImageMagick there is nothing to slice; fall back to the normal
+    // fit-inside-the-frame preview and do not advertise scrolling.
+    magick_bin()?;
+    let (cell_w, cell_h) = cell_pixels();
+    tall_screens_for(
+        post.width,
+        post.height,
+        rect.width,
+        rect.height,
+        cell_w,
+        cell_h,
+    )
+}
+
+/// Remove the image-scroll prefix from a status line, if present.
+fn strip_image_scroll_status(status: &str) -> &str {
+    const PREFIX: &str = "↑/↓ scroll Screen ";
+    status
+        .strip_prefix(PREFIX)
+        .and_then(|rest| rest.split_once(" · ").map(|(_, base)| base))
+        .unwrap_or(status)
+}
+
+/// Prefix the footer with the current image screen, replacing any previous
+/// scroll hint so repeated scrolls do not stack up.
+fn image_scroll_status(status: &str, scroll: usize, total: usize) -> String {
+    const PREFIX: &str = "↑/↓ scroll Screen ";
+    format!(
+        "{PREFIX}{}/{} · {}",
+        scroll + 1,
+        total,
+        strip_image_scroll_status(status)
+    )
+}
+
+/// Re-clamp the image screen after a layout change (sidebar toggle, resize)
+/// and keep the footer hint in sync, removing it when the image is no longer
+/// taller than the frame.
+fn refresh_image_scroll(status: &mut String, scroll: &mut usize, post: &Post, rect: Rect) {
+    match tall_slices(post, rect) {
+        Some(total) => {
+            *scroll = (*scroll).min(total.saturating_sub(1));
+            *status = image_scroll_status(status, *scroll, total);
+        }
+        None => {
+            *status = strip_image_scroll_status(status).to_string();
+        }
+    }
+}
+
+/// ImageMagick is only needed for very tall images; everything else keeps
+/// using kitty directly. Prefer v7's `magick`, fall back to `convert`.
+fn magick_bin() -> Option<&'static str> {
+    static BIN: OnceLock<Option<&'static str>> = OnceLock::new();
+    *BIN.get_or_init(|| {
+        ["magick", "convert"].into_iter().find(|bin| {
+            Command::new(bin)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+    })
+}
+
+/// Produce (and cache) one screenful of a tall image. The slice is generated
+/// at the pixel size of the image viewport, so kitty can place it without any
+/// further letterboxing.
+fn tall_slice_path(
+    post: &Post,
+    source: &Path,
+    rect: Rect,
+    index: usize,
+) -> Result<PathBuf, String> {
+    let bin = magick_bin().ok_or_else(|| "ImageMagick is not installed".to_string())?;
+    let (cell_w, cell_h) = cell_pixels();
+    let target_w = ((rect.width as f32 * cell_w).round() as u32).clamp(1, 16384);
+    let target_h = ((rect.height as f32 * cell_h).round() as u32).clamp(1, 16384);
+
+    let dir = std::env::temp_dir()
+        .join("gelbooru-downloader")
+        .join("slices")
+        .join(format!("{}_{}x{}", post.id, target_w, target_h));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create slice cache: {e}"))?;
+
+    let out = dir.join(format!("{index:04}.png"));
+    if std::fs::metadata(&out)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+    {
+        return Ok(out);
+    }
+
+    let tmp = dir.join(format!(".{index:04}.{}.part.png", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let geometry = format!(
+        "{}x{}+0+{}",
+        target_w,
+        target_h,
+        index as u64 * target_h as u64
+    );
+
+    let status = Command::new(bin)
+        .arg(source)
+        .arg("-auto-orient")
+        .arg("-resize")
+        .arg(format!("{target_w}x"))
+        .arg("-crop")
+        .arg(&geometry)
+        .arg("+repage")
+        // The final slice is often shorter than a full screen; pad it with
+        // transparency so kitty still scales every slice to the same width.
+        .arg("-background")
+        .arg("none")
+        .arg("-gravity")
+        .arg("north")
+        .arg("-extent")
+        .arg(format!("{target_w}x{target_h}"))
+        .arg(&tmp)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("Could not run ImageMagick: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("ImageMagick could not slice the image".to_string());
+    }
+    std::fs::rename(&tmp, &out).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Could not cache image slice: {e}")
+    })?;
+    Ok(out)
+}
+
 /// Place the full-resolution image inside `rect` using kitty's graphics
 /// protocol.  `--place` fits (and centers) the image inside the rectangle while
 /// keeping its aspect ratio.
 ///
+/// Very tall images (comic strips) are sliced into screenfuls at full width;
+/// `scroll` selects which screenful to display.
+///
 /// The child process is polled with a timeout so a non-graphics terminal (or a
 /// decoder that hangs) can never wedge the whole TUI.
-fn place_image(post: &Post, path: &Path, rect: Rect) -> Result<(), String> {
+fn place_image(post: &Post, path: &Path, rect: Rect, scroll: usize) -> Result<(), String> {
     if rect.width < 2 || rect.height < 2 {
         return Err("Terminal is too small for an image preview".to_string());
     }
-    let path = path
+
+    // Crop tall images to one screenful. If ImageMagick is unavailable or the
+    // crop fails, fall back to the normal fit-inside-the-frame behaviour.
+    let mut slice: Option<PathBuf> = None;
+    if let Some(total) = tall_slices(post, rect) {
+        let index = scroll.min(total.saturating_sub(1));
+        if let Ok(path) = tall_slice_path(post, path, rect, index) {
+            slice = Some(path);
+        }
+    }
+    let source = slice.as_deref().unwrap_or(path);
+    let path = source
         .to_str()
         .ok_or_else(|| "Preview path is not valid UTF-8".to_string())?;
     let place = format!("{}x{}@{}x{}", rect.width, rect.height, rect.x, rect.y);
@@ -2663,5 +3029,35 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), body);
         // Only the final file is left; the temporary file was renamed away.
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn wide_images_fit_in_one_screen() {
+        // 2000x1000 in a 100x30 viewport with 8x16 px cells: 800x480 px.
+        // Fitting the width gives a 400 px tall image, so no scrolling.
+        assert_eq!(tall_screens_for(2000, 1000, 100, 30, 8.0, 16.0), None);
+    }
+
+    #[test]
+    fn comic_strips_are_split_into_screenfuls() {
+        // 1000x10000 at full width = 8000 px tall, viewport is 480 px:
+        // ceil(8000 / 480) = 17 screens.
+        assert_eq!(tall_screens_for(1000, 10000, 100, 30, 8.0, 16.0), Some(17));
+    }
+
+    #[test]
+    fn images_without_dimensions_are_not_scrolled() {
+        assert_eq!(tall_screens_for(0, 10000, 100, 30, 8.0, 16.0), None);
+        assert_eq!(tall_screens_for(1000, 0, 100, 30, 8.0, 16.0), None);
+    }
+
+    #[test]
+    fn scroll_status_replaces_previous_hint() {
+        let first = image_scroll_status("Ready · 1.2 MB", 0, 5);
+        assert_eq!(first, "↑/↓ scroll Screen 1/5 · Ready · 1.2 MB");
+        let second = image_scroll_status(&first, 2, 5);
+        assert_eq!(second, "↑/↓ scroll Screen 3/5 · Ready · 1.2 MB");
+        assert_eq!(strip_image_scroll_status(&second), "Ready · 1.2 MB");
+        assert_eq!(strip_image_scroll_status("Ready"), "Ready");
     }
 }
