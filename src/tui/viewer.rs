@@ -1987,15 +1987,17 @@ fn tall_screens_for(
     if image_w <= 0 || image_h <= 0 || rect_w < 2 || rect_h < 2 {
         return None;
     }
-    let view_w = rect_w as f32 * cell_w;
-    let view_h = rect_h as f32 * cell_h;
-    let height_at_full_width = view_w * image_h as f32 / image_w as f32;
+    // Match the rounded pixel dimensions ImageMagick will actually use, so the
+    // calculated screen count lines up with the number of files it writes.
+    let target_w = (rect_w as f32 * cell_w).round().max(1.0);
+    let target_h = (rect_h as f32 * cell_h).round().max(1.0);
+    let height_at_full_width = target_w * image_h as f32 / image_w as f32;
     // Leave a tiny tolerance so a normal portrait image that is off by a
     // rounding pixel is not turned into two screens.
-    if height_at_full_width <= view_h * 1.01 {
+    if height_at_full_width <= target_h * 1.01 {
         return None;
     }
-    Some((height_at_full_width / view_h).ceil().max(1.0) as usize)
+    Some((height_at_full_width / target_h).ceil().max(1.0) as usize)
 }
 
 /// How many vertical screenfuls this post needs, if it is taller than the
@@ -2205,6 +2207,38 @@ fn start_slice_job(
     job
 }
 
+/// Fallback for a rounding mismatch between the calculated screen count and
+/// the number of files ImageMagick actually produced: use the last complete
+/// slice instead of falling back to the tiny fit-to-frame image.
+fn last_ready_slice(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent()?;
+    let ext = path.extension()?.to_str()?;
+    let mut best: Option<(usize, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let candidate = entry.path();
+        if candidate.extension().and_then(|e| e.to_str()) != Some(ext) {
+            continue;
+        }
+        let Some(index) = candidate
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if !slice_ready(&candidate) {
+            continue;
+        }
+        if best.as_ref().map(|(i, _)| index > *i).unwrap_or(true) {
+            best = Some((index, candidate));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 /// Wait until ImageMagick has written the requested slice. Slices appear in
 /// order, so a normal forward scroll only waits for a few milliseconds once
 /// the background job is underway.
@@ -2221,7 +2255,8 @@ fn wait_for_slice(job: &SliceJob, path: &Path) -> Result<PathBuf, String> {
                 return if slice_ready(path) {
                     Ok(path.to_path_buf())
                 } else {
-                    Err("ImageMagick produced no image slices".to_string())
+                    last_ready_slice(path)
+                        .ok_or_else(|| "ImageMagick produced no image slices".to_string())
                 };
             }
             Some(Err(e)) => {
@@ -2230,7 +2265,7 @@ fn wait_for_slice(job: &SliceJob, path: &Path) -> Result<PathBuf, String> {
                 return if slice_ready(path) {
                     Ok(path.to_path_buf())
                 } else {
-                    Err(e.clone())
+                    last_ready_slice(path).ok_or_else(|| e.clone())
                 };
             }
             None => {}

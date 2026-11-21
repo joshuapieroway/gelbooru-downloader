@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-11-20
+
+Patch release: accurate final screen for tall previews.
+
+### Fixed
+
+- The screen count now uses the same rounded pixel dimensions as the slice
+  generator, avoiding an off-by-one final screen on some viewport sizes.
+- If the calculated last screen is one past the files ImageMagick produced,
+  the viewer shows the final available slice instead of the tiny fit-to-frame
+  image.
+
 ## [1.2.2] - 2026-11-20
 
 Patch release: safer tall-image slice reuse.
