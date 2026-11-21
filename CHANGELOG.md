@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-11-20
+
+Patch release: safer tall-image slice reuse.
+
+### Fixed
+
+- A slice is only shown after its JPEG/PNG trailer has been written, so
+  scrolling while slices are still being generated can no longer hand a
+  truncated file to kitty.
+- Cached slices from an interrupted generation are detected and regenerated
+  instead of being displayed.
+
 ## [1.2.1] - 2026-11-20
 
 Patch release: instant scrolling for tall-image previews.

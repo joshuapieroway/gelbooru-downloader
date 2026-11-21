@@ -26,7 +26,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2085,14 +2085,35 @@ fn slice_jobs() -> &'static Mutex<HashMap<PathBuf, Arc<SliceJob>>> {
     JOBS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn slice_file_len(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .map(|m| if m.is_file() { m.len() } else { 0 })
-        .unwrap_or(0)
-}
-
+/// A slice is only usable once its closing bytes exist. This avoids handing a
+/// half-written JPEG/PNG to kitty when the user scrolls during generation.
 fn slice_ready(path: &Path) -> bool {
-    slice_file_len(path) > 0
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    let len = meta.len();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    match ext {
+        "jpg" | "jpeg" => {
+            if len < 2 || file.seek(SeekFrom::End(-2)).is_err() {
+                return false;
+            }
+            let mut tail = [0u8; 2];
+            file.read_exact(&mut tail).is_ok() && tail == [0xFF, 0xD9]
+        }
+        "png" => {
+            const IEND: [u8; 12] = [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82];
+            if len < IEND.len() as u64 || file.seek(SeekFrom::End(-12)).is_err() {
+                return false;
+            }
+            let mut tail = [0u8; 12];
+            file.read_exact(&mut tail).is_ok() && tail == IEND
+        }
+        _ => len > 0,
+    }
 }
 
 /// JPEG encoding is roughly three times faster than PNG and comic strips are
@@ -2216,20 +2237,12 @@ fn wait_for_slice(job: &SliceJob, path: &Path) -> Result<PathBuf, String> {
         }
 
         if slice_ready(path) {
-            // The file exists but ImageMagick may still be flushing it. Wait
-            // one short interval and make sure its size is stable.
-            let len = slice_file_len(path);
-            drop(state);
-            std::thread::sleep(Duration::from_millis(15));
-            if slice_file_len(path) == len && len > 0 {
-                return Ok(path.to_path_buf());
-            }
-        } else {
-            let _ = job
-                .cv
-                .wait_timeout(state, Duration::from_millis(25))
-                .unwrap_or_else(|e| e.into_inner());
+            return Ok(path.to_path_buf());
         }
+        let _ = job
+            .cv
+            .wait_timeout(state, Duration::from_millis(25))
+            .unwrap_or_else(|e| e.into_inner());
     }
 }
 
@@ -3187,6 +3200,26 @@ mod tests {
         assert_eq!(second, "↑/↓ scroll Screen 3/5 · Ready · 1.2 MB");
         assert_eq!(strip_image_scroll_status(&second), "Ready · 1.2 MB");
         assert_eq!(strip_image_scroll_status("Ready"), "Ready");
+    }
+
+    #[test]
+    fn truncated_slices_are_not_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jpg = tmp.path().join("a.jpg");
+        std::fs::write(&jpg, [0xFF, 0xD8, 0x00]).unwrap();
+        assert!(!slice_ready(&jpg));
+        std::fs::write(&jpg, [0xFF, 0xD8, 0x00, 0xFF, 0xD9]).unwrap();
+        assert!(slice_ready(&jpg));
+
+        let png = tmp.path().join("a.png");
+        std::fs::write(&png, b"partial").unwrap();
+        assert!(!slice_ready(&png));
+        std::fs::write(
+            &png,
+            [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82],
+        )
+        .unwrap();
+        assert!(slice_ready(&png));
     }
 
     #[test]
