@@ -30,7 +30,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
@@ -2072,16 +2072,177 @@ fn magick_bin() -> Option<&'static str> {
     })
 }
 
-/// Produce (and cache) one screenful of a tall image. The slice is generated
-/// at the pixel size of the image viewport, so kitty can place it without any
-/// further letterboxing.
+/// One background ImageMagick run per (post, viewport) pair. ImageMagick
+/// writes the slices sequentially, so the first screen can be shown while the
+/// rest are still being produced.
+struct SliceJob {
+    state: Mutex<Option<Result<(), String>>>,
+    cv: Condvar,
+}
+
+fn slice_jobs() -> &'static Mutex<HashMap<PathBuf, Arc<SliceJob>>> {
+    static JOBS: OnceLock<Mutex<HashMap<PathBuf, Arc<SliceJob>>>> = OnceLock::new();
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn slice_file_len(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|m| if m.is_file() { m.len() } else { 0 })
+        .unwrap_or(0)
+}
+
+fn slice_ready(path: &Path) -> bool {
+    slice_file_len(path) > 0
+}
+
+/// JPEG encoding is roughly three times faster than PNG and comic strips are
+/// normally opaque, so keep the source format where it matters.
+fn slice_ext(post: &Post) -> &'static str {
+    if matches!(post.extension().as_str(), "jpg" | "jpeg") {
+        "jpg"
+    } else {
+        "png"
+    }
+}
+
+fn generate_slices(
+    dir: &Path,
+    source: &Path,
+    target_w: u32,
+    target_h: u32,
+    ext: &str,
+) -> Result<(), String> {
+    let bin = magick_bin().ok_or_else(|| "ImageMagick is not installed".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Could not create slice cache: {e}"))?;
+
+    // A single decode produces every screenful, which is what makes scrolling
+    // instant after the first screen; doing one process per slice re-decoded
+    // the whole source each time.
+    let pattern = dir.join(format!("%04d.{ext}"));
+    let mut cmd = Command::new(bin);
+    cmd.arg(source)
+        .arg("-auto-orient")
+        .arg("-resize")
+        .arg(format!("{target_w}x"))
+        .arg("-crop")
+        .arg(format!("{target_w}x{target_h}"))
+        .arg("+repage")
+        // The final slice is often shorter than a full screen; pad it so
+        // every slice has the same size.
+        .arg("-background")
+        .arg(if ext == "jpg" { "white" } else { "none" })
+        .arg("-gravity")
+        .arg("north")
+        .arg("-extent")
+        .arg(format!("{target_w}x{target_h}"));
+    if ext == "jpg" {
+        cmd.arg("-quality").arg("88");
+    }
+    let status = cmd
+        .arg(&pattern)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("Could not run ImageMagick: {e}"))?;
+    if !status.success() {
+        return Err("ImageMagick could not slice the image".to_string());
+    }
+    Ok(())
+}
+
+fn start_slice_job(
+    dir: PathBuf,
+    source: PathBuf,
+    target_w: u32,
+    target_h: u32,
+    ext: &'static str,
+) -> Arc<SliceJob> {
+    let mut jobs = slice_jobs().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(job) = jobs.get(&dir) {
+        return job.clone();
+    }
+
+    let job = Arc::new(SliceJob {
+        state: Mutex::new(None),
+        cv: Condvar::new(),
+    });
+    jobs.insert(dir.clone(), job.clone());
+
+    let worker = job.clone();
+    std::thread::spawn(move || {
+        let result = generate_slices(&dir, &source, target_w, target_h, ext);
+        {
+            let mut state = worker.state.lock().unwrap_or_else(|e| e.into_inner());
+            *state = Some(result);
+        }
+        worker.cv.notify_all();
+        // Subsequent calls can rely on the slice files.
+        let mut jobs = slice_jobs().lock().unwrap_or_else(|e| e.into_inner());
+        jobs.remove(&dir);
+    });
+
+    job
+}
+
+/// Wait until ImageMagick has written the requested slice. Slices appear in
+/// order, so a normal forward scroll only waits for a few milliseconds once
+/// the background job is underway.
+fn wait_for_slice(job: &SliceJob, path: &Path) -> Result<PathBuf, String> {
+    let started = Instant::now();
+    loop {
+        if started.elapsed() >= Duration::from_secs(120) {
+            return Err("Timed out while preparing the tall image".to_string());
+        }
+
+        let state = job.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.as_ref() {
+            Some(Ok(())) => {
+                return if slice_ready(path) {
+                    Ok(path.to_path_buf())
+                } else {
+                    Err("ImageMagick produced no image slices".to_string())
+                };
+            }
+            Some(Err(e)) => {
+                // A failed job may still have written the slices before the
+                // failing one; use them when possible.
+                return if slice_ready(path) {
+                    Ok(path.to_path_buf())
+                } else {
+                    Err(e.clone())
+                };
+            }
+            None => {}
+        }
+
+        if slice_ready(path) {
+            // The file exists but ImageMagick may still be flushing it. Wait
+            // one short interval and make sure its size is stable.
+            let len = slice_file_len(path);
+            drop(state);
+            std::thread::sleep(Duration::from_millis(15));
+            if slice_file_len(path) == len && len > 0 {
+                return Ok(path.to_path_buf());
+            }
+        } else {
+            let _ = job
+                .cv
+                .wait_timeout(state, Duration::from_millis(25))
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// Return the cached screenful, starting a single background generation run
+/// if necessary. The slice is produced at the pixel size of the image
+/// viewport, so kitty can place it without any further letterboxing.
 fn tall_slice_path(
     post: &Post,
     source: &Path,
     rect: Rect,
     index: usize,
 ) -> Result<PathBuf, String> {
-    let bin = magick_bin().ok_or_else(|| "ImageMagick is not installed".to_string())?;
+    magick_bin().ok_or_else(|| "ImageMagick is not installed".to_string())?;
     let (cell_w, cell_h) = cell_pixels();
     let target_w = ((rect.width as f32 * cell_w).round() as u32).clamp(1, 16384);
     let target_h = ((rect.height as f32 * cell_h).round() as u32).clamp(1, 16384);
@@ -2090,55 +2251,22 @@ fn tall_slice_path(
         .join("gelbooru-downloader")
         .join("slices")
         .join(format!("{}_{}x{}", post.id, target_w, target_h));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create slice cache: {e}"))?;
+    let ext = slice_ext(post);
+    let path = dir.join(format!("{index:04}.{ext}"));
 
-    let out = dir.join(format!("{index:04}.png"));
-    if std::fs::metadata(&out)
-        .map(|m| m.is_file() && m.len() > 0)
-        .unwrap_or(false)
-    {
-        return Ok(out);
+    let running = {
+        let jobs = slice_jobs().lock().unwrap_or_else(|e| e.into_inner());
+        jobs.get(&dir).cloned()
+    };
+    if let Some(job) = running {
+        return wait_for_slice(&job, &path);
+    }
+    if slice_ready(&path) {
+        return Ok(path);
     }
 
-    let tmp = dir.join(format!(".{index:04}.{}.part.png", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    let geometry = format!(
-        "{}x{}+0+{}",
-        target_w,
-        target_h,
-        index as u64 * target_h as u64
-    );
-
-    let status = Command::new(bin)
-        .arg(source)
-        .arg("-auto-orient")
-        .arg("-resize")
-        .arg(format!("{target_w}x"))
-        .arg("-crop")
-        .arg(&geometry)
-        .arg("+repage")
-        // The final slice is often shorter than a full screen; pad it with
-        // transparency so kitty still scales every slice to the same width.
-        .arg("-background")
-        .arg("none")
-        .arg("-gravity")
-        .arg("north")
-        .arg("-extent")
-        .arg(format!("{target_w}x{target_h}"))
-        .arg(&tmp)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("Could not run ImageMagick: {e}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err("ImageMagick could not slice the image".to_string());
-    }
-    std::fs::rename(&tmp, &out).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("Could not cache image slice: {e}")
-    })?;
-    Ok(out)
+    let job = start_slice_job(dir, source.to_path_buf(), target_w, target_h, ext);
+    wait_for_slice(&job, &path)
 }
 
 /// Place the full-resolution image inside `rect` using kitty's graphics
@@ -3059,5 +3187,48 @@ mod tests {
         assert_eq!(second, "↑/↓ scroll Screen 3/5 · Ready · 1.2 MB");
         assert_eq!(strip_image_scroll_status(&second), "Ready · 1.2 MB");
         assert_eq!(strip_image_scroll_status("Ready"), "Ready");
+    }
+
+    #[test]
+    fn tall_slice_job_generates_and_reuses_slices() {
+        let Some(bin) = magick_bin() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("strip.jpg");
+        let made = Command::new(bin)
+            .arg("-size")
+            .arg("300x8000")
+            .arg("gradient:red-blue")
+            .arg(&source)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(made);
+
+        // A process-unique id keeps the slice cache from a previous run out of
+        // this test.
+        let id = 900_000_000
+            + (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+                % 100_000) as i64;
+        let post = Post {
+            id,
+            file_url: "https://example.invalid/strip.jpg".to_string(),
+            width: 300,
+            height: 8000,
+            ..Post::default()
+        };
+        let rect = Rect::new(0, 0, 80, 20);
+
+        let first = tall_slice_path(&post, &source, rect, 0).unwrap();
+        assert!(slice_ready(&first));
+        assert!(first.to_string_lossy().ends_with("0000.jpg"));
+
+        let fourth = tall_slice_path(&post, &source, rect, 3).unwrap();
+        assert!(slice_ready(&fourth));
+        assert!(fourth.to_string_lossy().ends_with("0003.jpg"));
     }
 }

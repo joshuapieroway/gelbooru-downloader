@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-11-20
+
+Patch release: instant scrolling for tall-image previews.
+
+### Changed
+
+- Tall-image slices are now generated in one background ImageMagick pass
+  instead of re-decoding the source for every scroll. The first screen appears
+  as before and the remaining screenfuls are ready almost immediately, so
+  scrolling no longer stalls on large comic strips.
+- JPEG sources produce JPEG slices (much faster to encode than PNG); other
+  sources keep PNG transparency.
+
 ## [1.2.0] - 2026-11-20
 
 Feature release: scrollable previews for very tall images.

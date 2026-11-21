@@ -81,8 +81,10 @@ In the viewer:
 Very tall images, such as comic strips and webtoons, are shown at the full
 width of the preview frame instead of being shrunk to fit its height. Scroll
 through them one screenful at a time with `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`,
-or the mouse wheel. Slicing uses ImageMagick (`magick` or `convert`); without
-it, tall images fall back to the normal fit-inside-the-frame preview.
+or the mouse wheel. Slices are prepared once in the background with ImageMagick
+(`magick` or `convert`), so scrolling through a large strip does not re-decode
+the image. Without ImageMagick, tall images fall back to the normal
+fit-inside-the-frame preview.
 
 Quick downloads go to a dedicated subfolder (configurable via
 `downloads.quick_download_directory`, default
