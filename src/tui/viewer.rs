@@ -1981,8 +1981,14 @@ fn cell_pixels() -> (f32, f32) {
     (8.0, 16.0)
 }
 
+/// An image must be at least this many screenfuls tall before it is treated as
+/// a scrollable comic strip. Ordinary portrait images (roughly 1-2 screens at
+/// full width) stay fit-inside-the-frame.
+const MIN_TALL_SCREENS: f32 = 3.0;
+
 /// Number of screenfuls a width-fitted image would occupy, or `None` when it
-/// already fits inside the viewport. Pure so the layout decision is testable.
+/// is not tall enough to be worth scrolling. Pure so the layout decision is
+/// testable.
 fn tall_screens_for(
     image_w: i64,
     image_h: i64,
@@ -1999,9 +2005,9 @@ fn tall_screens_for(
     let target_w = (rect_w as f32 * cell_w).round().max(1.0);
     let target_h = (rect_h as f32 * cell_h).round().max(1.0);
     let height_at_full_width = target_w * image_h as f32 / image_w as f32;
-    // Leave a tiny tolerance so a normal portrait image that is off by a
-    // rounding pixel is not turned into two screens.
-    if height_at_full_width <= target_h * 1.01 {
+    // Require several full screens: a normal portrait photo is often a little
+    // taller than the frame, but it should be fitted instead of paged.
+    if height_at_full_width < target_h * MIN_TALL_SCREENS {
         return None;
     }
     Some((height_at_full_width / target_h).ceil().max(1.0) as usize)
@@ -3379,10 +3385,20 @@ mod tests {
     }
 
     #[test]
+    fn normal_portraits_fit_instead_of_scrolling() {
+        // 1000x1500 (2:3) at full width = 1200 px tall, or 2.5 screens.
+        assert_eq!(tall_screens_for(1000, 1500, 100, 30, 8.0, 16.0), None);
+        // A 9:16 phone screenshot is still under three screens.
+        assert_eq!(tall_screens_for(1000, 1778, 100, 30, 8.0, 16.0), None);
+    }
+
+    #[test]
     fn comic_strips_are_split_into_screenfuls() {
         // 1000x10000 at full width = 8000 px tall, viewport is 480 px:
         // ceil(8000 / 480) = 17 screens.
         assert_eq!(tall_screens_for(1000, 10000, 100, 30, 8.0, 16.0), Some(17));
+        // Just over three screens is enough to scroll.
+        assert_eq!(tall_screens_for(1000, 2000, 100, 30, 8.0, 16.0), Some(4));
     }
 
     #[test]

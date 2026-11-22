@@ -80,13 +80,14 @@ In the viewer:
 | `Esc` / `q` | close the viewer |
 
 Very tall images, such as comic strips and webtoons, are shown at the full
-width of the preview frame instead of being shrunk to fit its height. `↑`/`↓`
-and the mouse wheel move half a screen, `PgUp`/`PgDn` move a full screen, and
-`Home`/`End` jump to the top or bottom. Slices are prepared once in the
-background with ImageMagick (`magick` or `convert`) and handed to kitty
-directly, so scrolling through a large strip never re-decodes the source or
-re-uploads it through the terminal. Without ImageMagick, tall images fall back
-to the normal fit-inside-the-frame preview.
+width of the preview frame instead of being shrunk to fit its height. This
+starts at three screenfuls; ordinary portrait photos and phone screenshots are
+still fitted inside the frame. `↑`/`↓` and the mouse wheel move half a screen,
+`PgUp`/`PgDn` move a full screen, and `Home`/`End` jump to the top or bottom.
+Slices are prepared once in the background with ImageMagick (`magick` or
+`convert`) and handed to kitty directly, so scrolling through a large strip
+never re-decodes the source or re-uploads it through the terminal. Without
+ImageMagick, tall images fall back to the normal fit-inside-the-frame preview.
 
 Quick downloads go to a dedicated subfolder (configurable via
 `downloads.quick_download_directory`, default

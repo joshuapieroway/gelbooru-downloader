@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.6] - 2026-11-21
+
+Patch release: fewer images treated as comic strips.
+
+### Fixed
+
+- Only images at least three screenfuls tall at full width are made
+  scrollable. Ordinary portrait photos and phone screenshots are fitted inside
+  the preview frame again instead of being paged at full width.
+
 ## [1.2.5] - 2026-11-21
 
 Patch release: finer tall-image scrolling.
