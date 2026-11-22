@@ -653,7 +653,6 @@ pub async fn show(
                                 if img_scroll > 0 {
                                     img_scroll -= 1;
                                     status = image_scroll_status(&status, img_scroll, total);
-                                    clear_images();
                                     last_img_rect = draw(
                                         terminal,
                                         &all_posts,
@@ -689,7 +688,6 @@ pub async fn show(
                                 if next != img_scroll {
                                     img_scroll = next;
                                     status = image_scroll_status(&status, img_scroll, total);
-                                    clear_images();
                                     last_img_rect = draw(
                                         terminal,
                                         &all_posts,
@@ -750,7 +748,6 @@ pub async fn show(
                                 if img_scroll != 0 {
                                     img_scroll = 0;
                                     status = image_scroll_status(&status, img_scroll, total);
-                                    clear_images();
                                     last_img_rect = draw(
                                         terminal,
                                         &all_posts,
@@ -785,7 +782,6 @@ pub async fn show(
                                 if img_scroll != next {
                                     img_scroll = next;
                                     status = image_scroll_status(&status, img_scroll, total);
-                                    clear_images();
                                     last_img_rect = draw(
                                         terminal,
                                         &all_posts,
@@ -965,7 +961,6 @@ pub async fn show(
                         if next != img_scroll {
                             img_scroll = next;
                             status = image_scroll_status(&status, img_scroll, total);
-                            clear_images();
                             last_img_rect = draw(
                                 terminal,
                                 &all_posts,
@@ -2118,14 +2113,11 @@ fn slice_ready(path: &Path) -> bool {
     }
 }
 
-/// JPEG encoding is roughly three times faster than PNG and comic strips are
-/// normally opaque, so keep the source format where it matters.
-fn slice_ext(post: &Post) -> &'static str {
-    if matches!(post.extension().as_str(), "jpg" | "jpeg") {
-        "jpg"
-    } else {
-        "png"
-    }
+/// Slices are handed to kitty through its graphics protocol, which reads PNG
+/// files directly (`f=100`). JPEG cannot be used here even though it encodes
+/// faster, because the protocol has no JPEG transfer format.
+fn slice_ext(_post: &Post) -> &'static str {
+    "png"
 }
 
 fn generate_slices(
@@ -2153,14 +2145,15 @@ fn generate_slices(
         // The final slice is often shorter than a full screen; pad it so
         // every slice has the same size.
         .arg("-background")
-        .arg(if ext == "jpg" { "white" } else { "none" })
+        .arg("none")
         .arg("-gravity")
         .arg("north")
         .arg("-extent")
-        .arg(format!("{target_w}x{target_h}"));
-    if ext == "jpg" {
-        cmd.arg("-quality").arg("88");
-    }
+        .arg(format!("{target_w}x{target_h}"))
+        // PNG is required by the graphics protocol. A low compression level
+        // keeps generation fast; the terminal reads the cached file anyway.
+        .arg("-define")
+        .arg("png:compression-level=3");
     let status = cmd
         .arg(&pattern)
         .stdout(Stdio::null())
@@ -2317,12 +2310,52 @@ fn tall_slice_path(
     wait_for_slice(&job, &path)
 }
 
+/// Image and placement ids used for tall previews. The same pair is reused for
+/// every screenful, so re-transmitting replaces the previous image instead of
+/// letting slices pile up in the terminal's memory.
+const TALL_IMAGE_ID: u32 = 0x4745_4C42; // "GELB"
+const TALL_PLACEMENT_ID: u32 = 1;
+
+/// Send one cached PNG slice through kitty's graphics protocol directly.
+///
+/// `t=f` lets the terminal read the file from disk itself, so paging only costs
+/// a decode. Going through `kitty +kitten icat` instead spawns two processes
+/// per screenful and uploads the image through the pty, which is what made
+/// scrolling through big strips feel sluggish.
+fn kitty_display_file(path: &Path, rect: Rect) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let sequence = kitty_display_sequence(path, rect)?;
+    let mut out = io::stdout();
+    out.write_all(sequence.as_bytes())
+        .and_then(|_| out.flush())
+        .map_err(|e| format!("Could not display the image: {e}"))
+}
+
+fn kitty_display_sequence(path: &Path, rect: Rect) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let path = path
+        .to_str()
+        .ok_or_else(|| "Preview path is not valid UTF-8".to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(path);
+    Ok(format!(
+        "\x1b[{};{}H\x1b_Ga=T,f=100,t=f,i={TALL_IMAGE_ID},p={TALL_PLACEMENT_ID},c={},r={},C=1,q=2;{encoded}\x1b\\",
+        rect.y + 1,
+        rect.x + 1,
+        rect.width,
+        rect.height
+    ))
+}
+
 /// Place the full-resolution image inside `rect` using kitty's graphics
 /// protocol.  `--place` fits (and centers) the image inside the rectangle while
 /// keeping its aspect ratio.
 ///
 /// Very tall images (comic strips) are sliced into screenfuls at full width;
-/// `scroll` selects which screenful to display.
+/// `scroll` selects which screenful to display. Those slices are shown through
+/// the graphics protocol directly; everything else, including animations and
+/// videos, keeps using `kitty +kitten icat`.
 ///
 /// The child process is polled with a timeout so a non-graphics terminal (or a
 /// decoder that hangs) can never wedge the whole TUI.
@@ -2333,15 +2366,13 @@ fn place_image(post: &Post, path: &Path, rect: Rect, scroll: usize) -> Result<()
 
     // Crop tall images to one screenful. If ImageMagick is unavailable or the
     // crop fails, fall back to the normal fit-inside-the-frame behaviour.
-    let mut slice: Option<PathBuf> = None;
     if let Some(total) = tall_slices(post, rect) {
         let index = scroll.min(total.saturating_sub(1));
-        if let Ok(path) = tall_slice_path(post, path, rect, index) {
-            slice = Some(path);
+        if let Ok(slice) = tall_slice_path(post, path, rect, index) {
+            return kitty_display_file(&slice, rect);
         }
     }
-    let source = slice.as_deref().unwrap_or(path);
-    let path = source
+    let path = path
         .to_str()
         .ok_or_else(|| "Preview path is not valid UTF-8".to_string())?;
     let place = format!("{}x{}@{}x{}", rect.width, rect.height, rect.x, rect.y);
@@ -3258,6 +3289,24 @@ mod tests {
     }
 
     #[test]
+    fn tall_slice_uses_graphics_protocol() {
+        let rect = Rect::new(3, 2, 80, 20);
+        let seq = kitty_display_sequence(Path::new("/tmp/a.png"), rect).unwrap();
+        assert!(seq.starts_with("\x1b[3;4H\x1b_G"));
+        assert!(seq.contains("a=T,f=100,t=f"));
+        assert!(seq.contains("c=80,r=20"));
+        assert!(seq.contains("C=1"));
+        assert!(seq.ends_with("\x1b\\"));
+
+        use base64::Engine as _;
+        let payload = seq.rsplit(';').next().unwrap().trim_end_matches("\x1b\\");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(decoded, b"/tmp/a.png");
+    }
+
+    #[test]
     fn tall_slice_job_generates_and_reuses_slices() {
         let Some(bin) = magick_bin() else {
             return;
@@ -3293,10 +3342,10 @@ mod tests {
 
         let first = tall_slice_path(&post, &source, rect, 0).unwrap();
         assert!(slice_ready(&first));
-        assert!(first.to_string_lossy().ends_with("0000.jpg"));
+        assert!(first.to_string_lossy().ends_with("0000.png"));
 
         let fourth = tall_slice_path(&post, &source, rect, 3).unwrap();
         assert!(slice_ready(&fourth));
-        assert!(fourth.to_string_lossy().ends_with("0003.jpg"));
+        assert!(fourth.to_string_lossy().ends_with("0003.png"));
     }
 }

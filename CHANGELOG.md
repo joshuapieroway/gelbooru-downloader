@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - 2026-11-20
+
+Patch release: responsive scrolling for large tall-image previews.
+
+### Changed
+
+- Screenfuls of tall images are now sent to the terminal through kitty's
+  graphics protocol directly. The terminal reads each cached slice itself
+  (`t=f`), so paging no longer spawns `kitty +kitten icat` twice per screenful
+  or uploads the image through the pty.
+- The current screenful is replaced in place using the same image and placement
+  id, so no stale slices accumulate in the terminal.
+
+### Fixed
+
+- Scrolling a very large comic strip no longer stalls between screens.
+
 ## [1.2.3] - 2026-11-20
 
 Patch release: accurate final screen for tall previews.
