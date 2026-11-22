@@ -68,8 +68,9 @@ In the viewer:
 | Key | Action |
 | --- | --- |
 | `←` / `→` | previous / next post |
-| `↑` / `↓` (or mouse wheel) | scroll a tall image screen by screen; otherwise move through tags |
-| `PgUp` / `PgDn`, `Home` / `End` | jump through a tall image, or move through tags |
+| `↑` / `↓` (or mouse wheel) | scroll a tall image half a screen; otherwise move through tags |
+| `PgUp` / `PgDn` | scroll a tall image a full screen; otherwise move through tags faster |
+| `Home` / `End` | jump to the top / bottom of a tall image, or move through tags |
 | `j` / `k` | select the previous / next tag |
 | `Enter` | open the selected tag as a new search |
 | `c` / `t` | copy post ID / tags |
@@ -79,13 +80,13 @@ In the viewer:
 | `Esc` / `q` | close the viewer |
 
 Very tall images, such as comic strips and webtoons, are shown at the full
-width of the preview frame instead of being shrunk to fit its height. Scroll
-through them one screenful at a time with `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`,
-or the mouse wheel. Slices are prepared once in the background with ImageMagick
-(`magick` or `convert`) and handed to kitty directly, so scrolling through a
-large strip never re-decodes the source or re-uploads it through the terminal.
-Without ImageMagick, tall images fall back to the normal fit-inside-the-frame
-preview.
+width of the preview frame instead of being shrunk to fit its height. `↑`/`↓`
+and the mouse wheel move half a screen, `PgUp`/`PgDn` move a full screen, and
+`Home`/`End` jump to the top or bottom. Slices are prepared once in the
+background with ImageMagick (`magick` or `convert`) and handed to kitty
+directly, so scrolling through a large strip never re-decodes the source or
+re-uploads it through the terminal. Without ImageMagick, tall images fall back
+to the normal fit-inside-the-frame preview.
 
 Quick downloads go to a dedicated subfolder (configurable via
 `downloads.quick_download_directory`, default

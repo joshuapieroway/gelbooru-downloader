@@ -276,8 +276,8 @@ pub async fn show(
         #[allow(unused_assignments)]
         let mut status = String::new();
         let mut preview: Option<PathBuf> = None;
-        // Which screenful of a very tall image (comic strip) is visible.
-        // Reset for every post; tall images are paged top-to-bottom.
+        // How far a very tall image (comic strip) is scrolled, in terminal
+        // rows. Reset for every post; tall images start at the top.
         let mut img_scroll = 0usize;
 
         // Collect finished quick downloads. The queue itself is updated by the
@@ -368,12 +368,12 @@ pub async fn show(
             show_sidebar,
         );
 
-        // Tall images (comic strips) are shown at full width one screenful at
-        // a time instead of being shrunk to fit the height. Add the scroll
-        // hint before placing the first slice.
+        // Tall images (comic strips) are shown at full width and scroll by row
+        // offset instead of being shrunk to fit the height. Add the scroll hint
+        // before placing the first slice.
         if let (Phase::Ready, Some(_)) = (&phase, &preview) {
-            if let Some(total) = tall_slices(post, last_img_rect) {
-                status = image_scroll_status(&status, img_scroll, total);
+            if let Some(max) = max_scroll_rows(post, last_img_rect) {
+                status = image_scroll_status(&status, img_scroll, max);
                 last_img_rect = draw(
                     terminal,
                     &all_posts,
@@ -649,10 +649,16 @@ pub async fn show(
                             }
                         }
                         KeyCode::Up | KeyCode::PageUp => {
-                            if let Some(total) = tall_slices(post, last_img_rect) {
-                                if img_scroll > 0 {
-                                    img_scroll -= 1;
-                                    status = image_scroll_status(&status, img_scroll, total);
+                            if let Some(max) = max_scroll_rows(post, last_img_rect) {
+                                let step = if k.code == KeyCode::PageUp {
+                                    (last_img_rect.height as usize).max(1)
+                                } else {
+                                    scroll_step_rows(last_img_rect)
+                                };
+                                let next = img_scroll.saturating_sub(step);
+                                if next != img_scroll {
+                                    img_scroll = next;
+                                    status = image_scroll_status(&status, img_scroll, max);
                                     last_img_rect = draw(
                                         terminal,
                                         &all_posts,
@@ -683,11 +689,16 @@ pub async fn show(
                             );
                         }
                         KeyCode::Down | KeyCode::PageDown => {
-                            if let Some(total) = tall_slices(post, last_img_rect) {
-                                let next = (img_scroll + 1).min(total.saturating_sub(1));
+                            if let Some(max) = max_scroll_rows(post, last_img_rect) {
+                                let step = if k.code == KeyCode::PageDown {
+                                    (last_img_rect.height as usize).max(1)
+                                } else {
+                                    scroll_step_rows(last_img_rect)
+                                };
+                                let next = (img_scroll + step).min(max);
                                 if next != img_scroll {
                                     img_scroll = next;
-                                    status = image_scroll_status(&status, img_scroll, total);
+                                    status = image_scroll_status(&status, img_scroll, max);
                                     last_img_rect = draw(
                                         terminal,
                                         &all_posts,
@@ -744,10 +755,10 @@ pub async fn show(
                             );
                         }
                         KeyCode::Home => {
-                            if let Some(total) = tall_slices(post, last_img_rect) {
+                            if let Some(max) = max_scroll_rows(post, last_img_rect) {
                                 if img_scroll != 0 {
                                     img_scroll = 0;
-                                    status = image_scroll_status(&status, img_scroll, total);
+                                    status = image_scroll_status(&status, img_scroll, max);
                                     last_img_rect = draw(
                                         terminal,
                                         &all_posts,
@@ -777,11 +788,11 @@ pub async fn show(
                             );
                         }
                         KeyCode::End => {
-                            if let Some(total) = tall_slices(post, last_img_rect) {
-                                let next = total.saturating_sub(1);
+                            if let Some(max) = max_scroll_rows(post, last_img_rect) {
+                                let next = max;
                                 if img_scroll != next {
                                     img_scroll = next;
-                                    status = image_scroll_status(&status, img_scroll, total);
+                                    status = image_scroll_status(&status, img_scroll, max);
                                     last_img_rect = draw(
                                         terminal,
                                         &all_posts,
@@ -952,15 +963,16 @@ pub async fn show(
                     // The wheel scrolls a tall comic strip before it touches
                     // the tag list, so long images can be read without leaving
                     // the keyboard.
-                    if let Some(total) = tall_slices(post, last_img_rect) {
+                    if let Some(max) = max_scroll_rows(post, last_img_rect) {
+                        let step = scroll_step_rows(last_img_rect);
                         let next = if delta < 0 {
-                            img_scroll.saturating_sub(1)
+                            img_scroll.saturating_sub(step)
                         } else {
-                            (img_scroll + 1).min(total.saturating_sub(1))
+                            (img_scroll + step).min(max)
                         };
                         if next != img_scroll {
                             img_scroll = next;
-                            status = image_scroll_status(&status, img_scroll, total);
+                            status = image_scroll_status(&status, img_scroll, max);
                             last_img_rect = draw(
                                 terminal,
                                 &all_posts,
@@ -1995,56 +2007,108 @@ fn tall_screens_for(
     Some((height_at_full_width / target_h).ceil().max(1.0) as usize)
 }
 
-/// How many vertical screenfuls this post needs, if it is taller than the
-/// image viewport when scaled to the viewport width.
-fn tall_slices(post: &Post, rect: Rect) -> Option<usize> {
-    // Animated GIFs and videos keep their existing single-frame/fit behaviour.
+/// Geometry of a tall image at the current viewport size.
+struct TallLayout {
+    target_w: u32,
+    target_h: u32,
+    /// Number of screenfuls ImageMagick writes for this viewport.
+    slices: usize,
+    /// Largest useful scroll offset, in terminal rows.
+    max_offset: usize,
+}
+
+/// Compute the tall-image layout, or `None` when the image fits the viewport.
+fn tall_layout(post: &Post, rect: Rect) -> Option<TallLayout> {
+    // Animated GIFs and videos keep their existing fit behaviour, and without
+    // ImageMagick there is nothing to slice.
     if media_kind(post) != MediaKind::Image {
         return None;
     }
-    // Without ImageMagick there is nothing to slice; fall back to the normal
-    // fit-inside-the-frame preview and do not advertise scrolling.
     magick_bin()?;
+
     let (cell_w, cell_h) = cell_pixels();
-    tall_screens_for(
+    let screens = tall_screens_for(
         post.width,
         post.height,
         rect.width,
         rect.height,
         cell_w,
         cell_h,
-    )
+    )?;
+
+    let target_w = (rect.width as f32 * cell_w).round().max(1.0);
+    let target_h = (rect.height as f32 * cell_h).round().max(1.0);
+    let content_h = (target_w * post.height as f32 / post.width as f32)
+        .round()
+        .max(1.0);
+    let px_per_row = target_h / rect.height as f32;
+    let rows = (content_h / px_per_row).ceil() as usize;
+
+    if rows <= rect.height as usize {
+        return None;
+    }
+    Some(TallLayout {
+        target_w: target_w as u32,
+        target_h: target_h as u32,
+        slices: screens,
+        max_offset: rows - rect.height as usize,
+    })
+}
+
+/// Split a row offset into the slice that supplies the top part, how many rows
+/// are skipped inside it, and how many rows that top part shows.
+fn tall_view_split(offset: usize, height: usize) -> (usize, usize, usize) {
+    let index = offset / height;
+    let skipped_rows = offset % height;
+    (index, skipped_rows, height - skipped_rows)
+}
+
+/// Largest scroll offset for a tall image, in terminal rows. `None` means the
+/// image is not tall enough to scroll.
+fn max_scroll_rows(post: &Post, rect: Rect) -> Option<usize> {
+    tall_layout(post, rect).map(|layout| layout.max_offset)
+}
+
+/// Arrow keys and the wheel move half a screen so reading keeps its place.
+fn scroll_step_rows(rect: Rect) -> usize {
+    (rect.height as usize / 2).max(1)
 }
 
 /// Remove the image-scroll prefix from a status line, if present.
 fn strip_image_scroll_status(status: &str) -> &str {
-    const PREFIX: &str = "↑/↓ scroll Screen ";
+    const PREFIX: &str = "↑/↓ scroll ";
     status
         .strip_prefix(PREFIX)
         .and_then(|rest| rest.split_once(" · ").map(|(_, base)| base))
         .unwrap_or(status)
 }
 
-/// Prefix the footer with the current image screen, replacing any previous
-/// scroll hint so repeated scrolls do not stack up.
-fn image_scroll_status(status: &str, scroll: usize, total: usize) -> String {
-    const PREFIX: &str = "↑/↓ scroll Screen ";
+fn scroll_percent(offset: usize, max: usize) -> u32 {
+    (offset * 100 + max / 2)
+        .checked_div(max)
+        .map(|percent| percent as u32)
+        .unwrap_or(100)
+}
+
+/// Prefix the footer with the scroll position, replacing any previous hint so
+/// repeated scrolls do not stack up.
+fn image_scroll_status(status: &str, offset: usize, max: usize) -> String {
+    const PREFIX: &str = "↑/↓ scroll ";
     format!(
-        "{PREFIX}{}/{} · {}",
-        scroll + 1,
-        total,
+        "{PREFIX}{}% · {}",
+        scroll_percent(offset, max),
         strip_image_scroll_status(status)
     )
 }
 
-/// Re-clamp the image screen after a layout change (sidebar toggle, resize)
+/// Re-clamp the scroll offset after a layout change (sidebar toggle, resize)
 /// and keep the footer hint in sync, removing it when the image is no longer
 /// taller than the frame.
 fn refresh_image_scroll(status: &mut String, scroll: &mut usize, post: &Post, rect: Rect) {
-    match tall_slices(post, rect) {
-        Some(total) => {
-            *scroll = (*scroll).min(total.saturating_sub(1));
-            *status = image_scroll_status(status, *scroll, total);
+    match max_scroll_rows(post, rect) {
+        Some(max) => {
+            *scroll = (*scroll).min(max);
+            *status = image_scroll_status(status, *scroll, max);
         }
         None => {
             *status = strip_image_scroll_status(status).to_string();
@@ -2310,52 +2374,121 @@ fn tall_slice_path(
     wait_for_slice(&job, &path)
 }
 
-/// Image and placement ids used for tall previews. The same pair is reused for
-/// every screenful, so re-transmitting replaces the previous image instead of
-/// letting slices pile up in the terminal's memory.
-const TALL_IMAGE_ID: u32 = 0x4745_4C42; // "GELB"
-const TALL_PLACEMENT_ID: u32 = 1;
+/// Image ids used for the two halves of a tall preview. Re-transmitting an id
+/// replaces the previous data, so only the visible halves stay in the terminal.
+const TALL_TOP_IMAGE_ID: u32 = 0x4745_4C42; // "GELB"
+const TALL_BOTTOM_IMAGE_ID: u32 = 0x4745_4C43;
+const TALL_TOP_PLACEMENT_ID: u32 = 1;
+const TALL_BOTTOM_PLACEMENT_ID: u32 = 2;
 
-/// Send one cached PNG slice through kitty's graphics protocol directly.
-///
-/// `t=f` lets the terminal read the file from disk itself, so paging only costs
-/// a decode. Going through `kitty +kitten icat` instead spawns two processes
-/// per screenful and uploads the image through the pty, which is what made
-/// scrolling through big strips feel sluggish.
-fn kitty_display_file(path: &Path, rect: Rect) -> Result<(), String> {
+struct KittyPlacement<'a> {
+    path: &'a Path,
+    x: u16,
+    y: u16,
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    cols: u16,
+    rows: u16,
+    image_id: u32,
+    placement_id: u32,
+}
+
+fn kitty_place_sequence(p: &KittyPlacement<'_>) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let path = p
+        .path
+        .to_str()
+        .ok_or_else(|| "Preview path is not valid UTF-8".to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(path);
+    Ok(format!(
+        "\x1b[{};{}H\x1b_Ga=T,f=100,t=f,i={},p={},x={},y={},w={},h={},c={},r={},C=1,q=2;{encoded}\x1b\\",
+        p.y + 1,
+        p.x + 1,
+        p.image_id,
+        p.placement_id,
+        p.src_x,
+        p.src_y,
+        p.src_w,
+        p.src_h,
+        p.cols,
+        p.rows
+    ))
+}
+
+/// Show a tall image at an arbitrary row offset. Two cached screenfuls are
+/// placed on top of each other when the view straddles a slice boundary, which
+/// allows scrolling by less than a full screen without generating extra
+/// slices.
+fn display_tall_view(post: &Post, source: &Path, rect: Rect, offset: usize) -> Result<(), String> {
     use std::io::Write as _;
 
-    let sequence = kitty_display_sequence(path, rect)?;
+    let layout =
+        tall_layout(post, rect).ok_or_else(|| "Image no longer needs scrolling".to_string())?;
+    let offset = offset.min(layout.max_offset);
+    let height = rect.height as usize;
+    let (index, rows_into, top_rows) = tall_view_split(offset, height);
+    let px_per_row = layout.target_h as f32 / rect.height as f32;
+    let skip = ((rows_into as f32) * px_per_row).round() as u32;
+
+    let mut sequence = String::new();
+
+    let top_index = index.min(layout.slices.saturating_sub(1));
+    let top = tall_slice_path(post, source, rect, top_index)?;
+    sequence.push_str(&kitty_place_sequence(&KittyPlacement {
+        path: &top,
+        x: rect.x,
+        y: rect.y,
+        src_x: 0,
+        src_y: skip,
+        src_w: layout.target_w,
+        src_h: layout.target_h.saturating_sub(skip).max(1),
+        cols: rect.width,
+        rows: top_rows as u16,
+        image_id: TALL_TOP_IMAGE_ID,
+        placement_id: TALL_TOP_PLACEMENT_ID,
+    })?);
+
+    if rows_into > 0 {
+        let bottom_index = (index + 1).min(layout.slices.saturating_sub(1));
+        let bottom = tall_slice_path(post, source, rect, bottom_index)?;
+        let bottom_h = ((rows_into as f32) * px_per_row).round().max(1.0) as u32;
+        sequence.push_str(&kitty_place_sequence(&KittyPlacement {
+            path: &bottom,
+            x: rect.x,
+            y: rect.y + top_rows as u16,
+            src_x: 0,
+            src_y: 0,
+            src_w: layout.target_w,
+            src_h: bottom_h.min(layout.target_h),
+            cols: rect.width,
+            rows: rows_into as u16,
+            image_id: TALL_BOTTOM_IMAGE_ID,
+            placement_id: TALL_BOTTOM_PLACEMENT_ID,
+        })?);
+    } else {
+        // Drop a bottom half left over from the previous offset.
+        sequence.push_str(&format!(
+            "\x1b_Ga=d,d=I,i={TALL_BOTTOM_IMAGE_ID},p={TALL_BOTTOM_PLACEMENT_ID},q=2\x1b\\"
+        ));
+    }
+
     let mut out = io::stdout();
     out.write_all(sequence.as_bytes())
         .and_then(|_| out.flush())
         .map_err(|e| format!("Could not display the image: {e}"))
 }
 
-fn kitty_display_sequence(path: &Path, rect: Rect) -> Result<String, String> {
-    use base64::Engine as _;
-
-    let path = path
-        .to_str()
-        .ok_or_else(|| "Preview path is not valid UTF-8".to_string())?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(path);
-    Ok(format!(
-        "\x1b[{};{}H\x1b_Ga=T,f=100,t=f,i={TALL_IMAGE_ID},p={TALL_PLACEMENT_ID},c={},r={},C=1,q=2;{encoded}\x1b\\",
-        rect.y + 1,
-        rect.x + 1,
-        rect.width,
-        rect.height
-    ))
-}
-
 /// Place the full-resolution image inside `rect` using kitty's graphics
 /// protocol.  `--place` fits (and centers) the image inside the rectangle while
 /// keeping its aspect ratio.
 ///
-/// Very tall images (comic strips) are sliced into screenfuls at full width;
-/// `scroll` selects which screenful to display. Those slices are shown through
-/// the graphics protocol directly; everything else, including animations and
-/// videos, keeps using `kitty +kitten icat`.
+/// Very tall images (comic strips) are sliced into screenfuls at full width and
+/// scrolled by row offset; `scroll` is that offset. Those slices are shown
+/// through the graphics protocol directly, while everything else, including
+/// animations and videos, keeps using `kitty +kitten icat`.
 ///
 /// The child process is polled with a timeout so a non-graphics terminal (or a
 /// decoder that hangs) can never wedge the whole TUI.
@@ -2364,12 +2497,12 @@ fn place_image(post: &Post, path: &Path, rect: Rect, scroll: usize) -> Result<()
         return Err("Terminal is too small for an image preview".to_string());
     }
 
-    // Crop tall images to one screenful. If ImageMagick is unavailable or the
-    // crop fails, fall back to the normal fit-inside-the-frame behaviour.
-    if let Some(total) = tall_slices(post, rect) {
-        let index = scroll.min(total.saturating_sub(1));
-        if let Ok(slice) = tall_slice_path(post, path, rect, index) {
-            return kitty_display_file(&slice, rect);
+    // Tall images are shown at full width with a row offset. If ImageMagick is
+    // unavailable or slicing fails, fall back to the fit-inside-frame view.
+    if let Some(layout) = tall_layout(post, rect) {
+        let offset = scroll.min(layout.max_offset);
+        if display_tall_view(post, path, rect, offset).is_ok() {
+            return Ok(());
         }
     }
     let path = path
@@ -3259,13 +3392,24 @@ mod tests {
     }
 
     #[test]
+    fn tall_view_splits_offsets_across_slices() {
+        assert_eq!(tall_view_split(0, 20), (0, 0, 20));
+        assert_eq!(tall_view_split(10, 20), (0, 10, 10));
+        assert_eq!(tall_view_split(20, 20), (1, 0, 20));
+        assert_eq!(tall_view_split(25, 20), (1, 5, 15));
+    }
+
+    #[test]
     fn scroll_status_replaces_previous_hint() {
-        let first = image_scroll_status("Ready · 1.2 MB", 0, 5);
-        assert_eq!(first, "↑/↓ scroll Screen 1/5 · Ready · 1.2 MB");
-        let second = image_scroll_status(&first, 2, 5);
-        assert_eq!(second, "↑/↓ scroll Screen 3/5 · Ready · 1.2 MB");
+        let first = image_scroll_status("Ready · 1.2 MB", 0, 100);
+        assert_eq!(first, "↑/↓ scroll 0% · Ready · 1.2 MB");
+        let second = image_scroll_status(&first, 50, 100);
+        assert_eq!(second, "↑/↓ scroll 50% · Ready · 1.2 MB");
         assert_eq!(strip_image_scroll_status(&second), "Ready · 1.2 MB");
         assert_eq!(strip_image_scroll_status("Ready"), "Ready");
+        assert_eq!(scroll_percent(0, 0), 100);
+        assert_eq!(scroll_percent(1, 3), 33);
+        assert_eq!(scroll_percent(2, 3), 67);
     }
 
     #[test]
@@ -3290,11 +3434,23 @@ mod tests {
 
     #[test]
     fn tall_slice_uses_graphics_protocol() {
-        let rect = Rect::new(3, 2, 80, 20);
-        let seq = kitty_display_sequence(Path::new("/tmp/a.png"), rect).unwrap();
+        let seq = kitty_place_sequence(&KittyPlacement {
+            path: Path::new("/tmp/a.png"),
+            x: 3,
+            y: 2,
+            src_x: 0,
+            src_y: 40,
+            src_w: 800,
+            src_h: 200,
+            cols: 80,
+            rows: 12,
+            image_id: TALL_TOP_IMAGE_ID,
+            placement_id: TALL_TOP_PLACEMENT_ID,
+        })
+        .unwrap();
         assert!(seq.starts_with("\x1b[3;4H\x1b_G"));
         assert!(seq.contains("a=T,f=100,t=f"));
-        assert!(seq.contains("c=80,r=20"));
+        assert!(seq.contains("x=0,y=40,w=800,h=200,c=80,r=12"));
         assert!(seq.contains("C=1"));
         assert!(seq.ends_with("\x1b\\"));
 

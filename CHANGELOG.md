@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.5] - 2026-11-21
+
+Patch release: finer tall-image scrolling.
+
+### Changed
+
+- `↑`/`↓` and the mouse wheel now move half a screen through a tall image;
+  `PgUp`/`PgDn` still move a full screen, and `Home`/`End` jump to the ends.
+- The footer shows the scroll position as a percentage (`↑/↓ scroll 38%`).
+- Partial positions are rendered by stacking the overlapping parts of two
+  cached screenfuls, so smaller steps do not create extra slices or temporary
+  files.
+
 ## [1.2.4] - 2026-11-20
 
 Patch release: responsive scrolling for large tall-image previews.

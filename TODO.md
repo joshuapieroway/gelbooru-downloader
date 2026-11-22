@@ -1,6 +1,6 @@
 # TODO — gelbooru-downloader
 
-Project version: 1.2.4 (2026-11-20)
+Project version: 1.2.5 (2026-11-21)
 Source of truth for planned work. Update as items ship; move done items to the bottom.
 
 ## High Priority — sort/filter parity
