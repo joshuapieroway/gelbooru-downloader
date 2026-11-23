@@ -492,32 +492,31 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
         return;
     };
     let state = state.clone();
-    let complex = query.contains('|')
-        || query.contains('[')
-        || query.contains(']')
-        || (query.contains('(') && query.contains(" ( "))
-        || (query.contains(')') && query.contains(" ) "))
-        || query.contains(" -")
-        || query.starts_with('-');
+    let complex = crate::api::search::query_is_complex(&query);
 
     tokio::spawn(async move {
         let mut fetch_err: Option<String> = None;
         let mut merged: Vec<crate::api::models::Post> = Vec::new();
         let mut total = 0i64;
         let mut fetched_raw = 0usize;
+        let mut complex_has_more = false;
 
         if complex {
             let mut params = crate::api::search::SearchParams::new(query.clone());
-            // Fetch a larger batch for complex queries so the user sees more
-            // than one page (pagination is not supported for these).
-            params.limit = 500;
+            // The window function fetches enough per branch to fill this page.
+            params.limit = 0;
             params.page_size = per_page as u32;
             let mut cfg = Config::default();
             cfg.search.default_rating = "all".to_string();
-            match crate::api::search::search_expr(&client, &cfg, &params).await {
-                Ok(posts) => {
-                    total = posts.len() as i64;
+            let offset = page.saturating_sub(1).saturating_mul(per_page);
+            match crate::api::search::search_expr_window(&client, &cfg, &params, offset, per_page)
+                .await
+            {
+                Ok((posts, has_more)) => {
+                    // An OR query has no single server-side result count.
+                    total = 0;
                     fetched_raw = posts.len();
+                    complex_has_more = has_more;
                     for p in posts {
                         if !p.extension().eq_ignore_ascii_case("mp4") {
                             merged.push(p);
@@ -585,7 +584,7 @@ fn begin_search(state: &Arc<Mutex<AppState>>, page: usize) {
         }
 
         let has_more = if complex {
-            false
+            complex_has_more
         } else if total > 0 {
             (page as i64) * (per_page as i64) < total
         } else {

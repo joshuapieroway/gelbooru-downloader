@@ -60,11 +60,128 @@ pub fn validate_sort_order(sort: &Option<String>, order: &Option<String>) -> Res
     Ok(())
 }
 
-/// Normalize whitespace in a search query. `&` is no longer special (a space
-/// already means AND in Gelbooru); `|` (OR) and brackets are handled by the
-/// expression parser, not here.
-pub fn translate_operators(q: &str) -> String {
+/// One conjunctive branch of a boolean search query.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryBranch {
+    pub required: Vec<String>,
+    pub excluded: Vec<String>,
+}
+
+impl QueryBranch {
+    /// Tags string understood by both Gelbooru and Rule34. A leading `-`
+    /// excludes a tag on both boards.
+    pub fn to_server_tags(&self) -> String {
+        let mut parts = self.required.clone();
+        parts.extend(self.excluded.iter().map(|tag| format!("-{tag}")));
+        parts.join(" ")
+    }
+
+    /// True when the branch only excludes tags and has no positive term. Such
+    /// a branch can be sent to the server on its own, but cannot be enumerated
+    /// as one side of a client-side OR.
+    pub fn is_pure_exclusion(&self) -> bool {
+        self.required.is_empty() && !self.excluded.is_empty()
+    }
+}
+
+/// Parsed form of a search query: metatags plus disjunctive normal form.
+#[derive(Debug, Clone, Default)]
+pub struct QueryPlan {
+    pub metatags: Vec<String>,
+    pub branches: Vec<QueryBranch>,
+}
+
+impl QueryPlan {
+    pub fn is_or(&self) -> bool {
+        self.branches.len() > 1
+    }
+
+    /// Server tag string for a single conjunction, including metatags. Only
+    /// meaningful when `is_or()` is false.
+    pub fn single_branch_tags(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(branch) = self.branches.first() {
+            let tags = branch.to_server_tags();
+            if !tags.is_empty() {
+                parts.push(tags);
+            }
+        }
+        parts.extend(self.metatags.iter().cloned());
+        parts.join(" ")
+    }
+}
+
+/// Normalize whitespace without changing any operators.
+fn normalize_tags(q: &str) -> String {
     q.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Parse a query into branches that can be sent to Gelbooru/Rule34.
+///
+/// Both boards understand whitespace (AND) and a leading `-` (NOT), but
+/// neither understands `|`. OR queries therefore become several branches that
+/// are fetched separately and merged client-side.
+pub fn compile_query(q: &str) -> QueryPlan {
+    let (metatags, rest) = split_metatags(q);
+    if rest.trim().is_empty() {
+        return QueryPlan {
+            metatags,
+            branches: Vec::new(),
+        };
+    }
+
+    if let Some(expr) = parse_query_expr(&rest) {
+        let branches = to_dnf(&expr)
+            .into_iter()
+            .map(|(required, excluded)| QueryBranch { required, excluded })
+            .collect();
+        return QueryPlan { metatags, branches };
+    }
+
+    // Be forgiving of a stray operator (`cat |`, `| cat`, unbalanced
+    // brackets): keep the tags we can understand instead of sending `|`
+    // literally to the board.
+    QueryPlan {
+        metatags,
+        branches: vec![fallback_branch(&rest)],
+    }
+}
+
+fn fallback_branch(q: &str) -> QueryBranch {
+    let mut branch = QueryBranch::default();
+    let mut negate_next = false;
+    for tok in tokenize_expr(q) {
+        match tok {
+            Tok::Not => negate_next = true,
+            Tok::Tag(tag) if tag != "-" => {
+                if negate_next {
+                    branch.excluded.push(tag);
+                } else {
+                    branch.required.push(tag);
+                }
+                negate_next = false;
+            }
+            _ => {}
+        }
+    }
+    branch
+}
+
+/// True when a query needs the client-side OR path.
+pub fn query_is_complex(q: &str) -> bool {
+    compile_query(q).is_or()
+}
+
+/// Compile a single-conjunction query to the tag syntax both boards accept.
+/// OR queries cannot be represented in one request; callers should use
+/// [`query_is_complex`] first.
+pub fn translate_operators(q: &str) -> String {
+    let plan = compile_query(q);
+    if plan.is_or() {
+        normalize_tags(q)
+    } else {
+        plan.single_branch_tags()
+    }
 }
 
 impl SearchParams {
@@ -86,19 +203,7 @@ pub async fn search_all(
     cfg: &Config,
     params: &SearchParams,
 ) -> Result<Vec<Post>> {
-    let complex = params.tags.contains('|')
-        || params.tags.contains('[')
-        || params.tags.contains(']')
-        || (params.tags.contains('(') && params.tags.contains(" ( "))
-        || (params.tags.contains(')') && params.tags.contains(" ) "))
-        || params.tags.contains(" -")
-        || params.tags.starts_with('-');
-
-    if complex {
-        return search_expr(client, cfg, params).await;
-    }
-
-    search_single(client, cfg, params).await
+    search_expr(client, cfg, params).await
 }
 
 pub async fn search_single(
@@ -536,6 +641,304 @@ mod tests {
         let res = search_all(&client, &cfg, &params).await;
         assert!(matches!(res, Err(AppError::Http(_))), "{res:?}");
     }
+
+    fn rule34_config(server: &MockServer) -> Config {
+        let mut cfg = Config::default();
+        cfg.rule34.base_url = server.uri();
+        cfg.rule34.user_id = "42".to_string();
+        cfg.rule34.api_key = "secret".to_string();
+        cfg
+    }
+
+    fn ids(posts: &[Post]) -> Vec<i64> {
+        posts.iter().map(|p| p.id).collect()
+    }
+
+    #[test]
+    fn compiles_plain_and_exclusion_queries() {
+        let plan = compile_query("cat dog");
+        assert_eq!(plan.branches.len(), 1);
+        assert_eq!(plan.branches[0].required, vec!["cat", "dog"]);
+        assert!(plan.branches[0].excluded.is_empty());
+        assert_eq!(plan.single_branch_tags(), "cat dog");
+        assert!(!plan.is_or());
+
+        let plan = compile_query("cat -dog");
+        assert_eq!(plan.single_branch_tags(), "cat -dog");
+        assert!(!plan.is_or());
+
+        let plan = compile_query("- dog");
+        assert_eq!(plan.single_branch_tags(), "-dog");
+        assert!(!plan.is_or());
+    }
+
+    #[test]
+    fn compiles_lone_exclusion_without_dropping_it() {
+        let plan = compile_query("-dog");
+        assert_eq!(plan.branches.len(), 1);
+        assert!(plan.branches[0].required.is_empty());
+        assert_eq!(plan.branches[0].excluded, vec!["dog"]);
+        assert_eq!(plan.single_branch_tags(), "-dog");
+        assert!(!query_is_complex("-dog"));
+    }
+
+    #[test]
+    fn compiles_or_queries_into_branches() {
+        let plan = compile_query("cat -dog | bird");
+        assert_eq!(plan.branches.len(), 2);
+        assert_eq!(plan.branches[0].to_server_tags(), "cat -dog");
+        assert_eq!(plan.branches[1].to_server_tags(), "bird");
+        assert!(plan.is_or());
+        assert!(query_is_complex("cat -dog | bird"));
+        assert!(!query_is_complex("cat -dog"));
+    }
+
+    #[test]
+    fn compiles_grouped_parentheses_without_breaking_tag_parentheses() {
+        let plan = compile_query("(cat | dog) bird");
+        assert_eq!(plan.branches.len(), 2);
+        assert_eq!(plan.branches[0].to_server_tags(), "cat bird");
+        assert_eq!(plan.branches[1].to_server_tags(), "dog bird");
+
+        let plan = compile_query("(rem_(re:zero) | cat) -dog");
+        assert_eq!(plan.branches.len(), 2);
+        assert_eq!(plan.branches[0].to_server_tags(), "rem_(re:zero) -dog");
+        assert_eq!(plan.branches[1].to_server_tags(), "cat -dog");
+
+        let plan = compile_query("rem_(re:zero)");
+        assert_eq!(plan.single_branch_tags(), "rem_(re:zero)");
+    }
+
+    #[test]
+    fn compiles_negated_groups_with_de_morgan() {
+        let plan = compile_query("-[cat | dog]");
+        assert_eq!(plan.branches.len(), 1);
+        assert!(plan.branches[0].required.is_empty());
+        assert_eq!(plan.branches[0].excluded, vec!["cat", "dog"]);
+        assert_eq!(plan.single_branch_tags(), "-cat -dog");
+    }
+
+    #[test]
+    fn keeps_metatags_separate_from_branches() {
+        let plan = compile_query("sort:score cat | dog");
+        assert_eq!(plan.metatags, vec!["sort:score"]);
+        assert_eq!(plan.branches.len(), 2);
+        assert_eq!(plan.branches[0].to_server_tags(), "cat");
+        assert_eq!(plan.branches[1].to_server_tags(), "dog");
+    }
+
+    #[test]
+    fn forgives_stray_or_operators() {
+        assert_eq!(compile_query("cat |").single_branch_tags(), "cat");
+        assert_eq!(compile_query("| cat").single_branch_tags(), "cat");
+        assert_eq!(compile_query("cat & dog").single_branch_tags(), "cat dog");
+        assert_eq!(translate_operators("  cat   -dog "), "cat -dog");
+    }
+
+    #[tokio::test]
+    async fn exclusion_is_sent_to_the_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "cat -dog"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&[post(1, 100)])))
+            .mount(&server)
+            .await;
+
+        let mut cfg = Config::default();
+        cfg.api.base_url = server.uri();
+        let client = GelbooruClient::new(&cfg).unwrap();
+        let params = SearchParams {
+            rating: Some("all".into()),
+            ..SearchParams::new("cat -dog".into())
+        };
+        let posts = search_all(&client, &cfg, &params).await.unwrap();
+        assert_eq!(ids(&posts), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn lone_exclusion_is_sent_to_the_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "-dog"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&[post(5, 100)])))
+            .mount(&server)
+            .await;
+
+        let mut cfg = Config::default();
+        cfg.api.base_url = server.uri();
+        let client = GelbooruClient::new(&cfg).unwrap();
+        let params = SearchParams {
+            rating: Some("all".into()),
+            ..SearchParams::new("-dog".into())
+        };
+        let posts = search_all(&client, &cfg, &params).await.unwrap();
+        assert_eq!(ids(&posts), vec![5]);
+    }
+
+    #[tokio::test]
+    async fn or_results_are_interleaved_and_deduplicated() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "cat"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(body(&[post(1, 100), post(2, 100)])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "dog"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(body(&[post(2, 100), post(3, 100)])),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = Config::default();
+        cfg.api.base_url = server.uri();
+        let client = GelbooruClient::new(&cfg).unwrap();
+        let params = SearchParams {
+            rating: Some("all".into()),
+            limit: 10,
+            ..SearchParams::new("cat | dog".into())
+        };
+        let posts = search_all(&client, &cfg, &params).await.unwrap();
+        assert_eq!(ids(&posts), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn or_windows_paginate_without_overlap() {
+        let server = MockServer::start().await;
+        let cat: Vec<_> = (1..=10).map(|i| post(i, 100)).collect();
+        let dog: Vec<_> = (11..=20).map(|i| post(i, 100)).collect();
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "cat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&cat)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "dog"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&dog)))
+            .mount(&server)
+            .await;
+
+        let mut cfg = Config::default();
+        cfg.api.base_url = server.uri();
+        let client = GelbooruClient::new(&cfg).unwrap();
+        let params = SearchParams {
+            rating: Some("all".into()),
+            limit: 0,
+            ..SearchParams::new("cat | dog".into())
+        };
+
+        let (first, more) = search_expr_window(&client, &cfg, &params, 0, 5)
+            .await
+            .unwrap();
+        assert_eq!(ids(&first), vec![1, 11, 2, 12, 3]);
+        assert!(more);
+
+        let (second, more) = search_expr_window(&client, &cfg, &params, 5, 5)
+            .await
+            .unwrap();
+        assert_eq!(ids(&second), vec![13, 4, 14, 5, 15]);
+        assert!(more);
+        assert!(first.iter().all(|p| !second.iter().any(|q| q.id == p.id)));
+
+        let (last, more) = search_expr_window(&client, &cfg, &params, 15, 5)
+            .await
+            .unwrap();
+        assert_eq!(last.len(), 5);
+        assert!(!more);
+    }
+
+    #[tokio::test]
+    async fn metatags_are_sent_to_every_or_branch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "cat sort:score"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&[post(1, 100)])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "dog sort:score"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&[post(2, 100)])))
+            .mount(&server)
+            .await;
+
+        let mut cfg = Config::default();
+        cfg.api.base_url = server.uri();
+        let client = GelbooruClient::new(&cfg).unwrap();
+        let params = SearchParams {
+            rating: Some("all".into()),
+            limit: 10,
+            ..SearchParams::new("sort:score cat | dog".into())
+        };
+        let posts = search_all(&client, &cfg, &params).await.unwrap();
+        assert_eq!(ids(&posts), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn rule34_uses_native_exclusions_and_or_branches() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "cat -dog"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&[post(1, 100)])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "bird"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&[post(2, 100)])))
+            .mount(&server)
+            .await;
+
+        let cfg = rule34_config(&server);
+        let client = GelbooruClient::new_for(&cfg, crate::api::client::Source::Rule34).unwrap();
+        let params = SearchParams {
+            rating: Some("all".into()),
+            limit: 10,
+            ..SearchParams::new("cat -dog | bird".into())
+        };
+        let posts = search_all(&client, &cfg, &params).await.unwrap();
+        assert_eq!(ids(&posts), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn rule34_lone_exclusion_is_sent_to_the_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/index.php"))
+            .and(query_param("tags", "-dog"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body(&[post(9, 100)])))
+            .mount(&server)
+            .await;
+
+        let cfg = rule34_config(&server);
+        let client = GelbooruClient::new_for(&cfg, crate::api::client::Source::Rule34).unwrap();
+        let params = SearchParams {
+            rating: Some("all".into()),
+            ..SearchParams::new("-dog".into())
+        };
+        let posts = search_all(&client, &cfg, &params).await.unwrap();
+        assert_eq!(ids(&posts), vec![9]);
+    }
+
+    #[tokio::test]
+    async fn or_with_only_exclusions_is_rejected() {
+        let cfg = Config::default();
+        let client = GelbooruClient::new(&cfg).unwrap();
+        let params = SearchParams::new("-cat | -dog".into());
+        let err = search_all(&client, &cfg, &params).await.unwrap_err();
+        assert!(err.to_string().contains("positive tag"), "{err}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,9 +964,10 @@ enum Tok {
 }
 
 fn tokenize_expr(s: &str) -> Vec<Tok> {
-    let mut tokens = Vec::new();
     let chars: Vec<char> = s.chars().collect();
     let n = chars.len();
+    let mut tokens = Vec::new();
+    let mut group_depth = 0usize;
     let mut i = 0;
     while i < n {
         if chars[i].is_whitespace() {
@@ -573,23 +977,30 @@ fn tokenize_expr(s: &str) -> Vec<Tok> {
         // Square brackets are always grouping brackets.
         if chars[i] == '[' {
             tokens.push(Tok::Open);
+            group_depth += 1;
             i += 1;
             continue;
         }
         if chars[i] == ']' {
             tokens.push(Tok::Close);
+            group_depth = group_depth.saturating_sub(1);
             i += 1;
             continue;
         }
-        // Parentheses are grouping brackets only when space-padded, so that
-        // Gelbooru tags like `rem_(re:zero)` stay intact.
-        if chars[i] == '(' && i + 1 < n && chars[i + 1].is_whitespace() {
+        // Parentheses group when they start a token. This accepts both
+        // `(a | b)` and `( a | b )` while keeping tags such as
+        // `rem_(re:zero)` in one piece.
+        if chars[i] == '(' && at_token_start(&chars, i) {
             tokens.push(Tok::Open);
+            group_depth += 1;
             i += 1;
             continue;
         }
-        if chars[i] == ')' && i > 0 && chars[i - 1].is_whitespace() {
-            tokens.push(Tok::Close);
+        if chars[i] == ')' {
+            if group_depth > 0 {
+                tokens.push(Tok::Close);
+                group_depth -= 1;
+            }
             i += 1;
             continue;
         }
@@ -603,28 +1014,46 @@ fn tokenize_expr(s: &str) -> Vec<Tok> {
             i += 1;
             continue;
         }
-        // '-' is NOT only at a boundary.
-        let at_boundary = i == 0
-            || chars[i - 1].is_whitespace()
-            || chars[i - 1] == '['
-            || chars[i - 1] == ']'
-            || chars[i - 1] == '&'
-            || chars[i - 1] == '|';
-        if chars[i] == '-' && at_boundary && i + 1 < n && !chars[i + 1].is_whitespace() {
+        // '-' is NOT at a token boundary. Accept both `-tag` and `- tag`.
+        if chars[i] == '-' && at_operator_boundary(&chars, i) {
             tokens.push(Tok::Not);
             i += 1;
             continue;
         }
-        // tag: read until whitespace or bracket or operator
+
+        // Read a tag. Parentheses inside a tag belong to the tag, so
+        // `rem_(re:zero)` survives while `(a | b)` still groups.
         let mut tag = String::new();
-        while i < n
-            && !chars[i].is_whitespace()
-            && chars[i] != '['
-            && chars[i] != ']'
-            && chars[i] != '&'
-            && chars[i] != '|'
-        {
-            tag.push(chars[i]);
+        let mut tag_parens = 0usize;
+        while i < n {
+            let c = chars[i];
+            if c.is_whitespace() || c == '[' || c == ']' || c == '&' || c == '|' {
+                break;
+            }
+            if c == '(' {
+                tag_parens += 1;
+                tag.push(c);
+                i += 1;
+                continue;
+            }
+            if c == ')' {
+                if tag_parens > 0 {
+                    tag_parens -= 1;
+                    tag.push(c);
+                    i += 1;
+                    continue;
+                }
+                // A closing parenthesis with no tag-local opener ends a
+                // group, but only at a token boundary. Otherwise it is just
+                // part of the tag.
+                if group_depth > 0 && (i + 1 == n || is_token_separator(chars[i + 1])) {
+                    break;
+                }
+                tag.push(c);
+                i += 1;
+                continue;
+            }
+            tag.push(c);
             i += 1;
         }
         if !tag.is_empty() {
@@ -632,6 +1061,29 @@ fn tokenize_expr(s: &str) -> Vec<Tok> {
         }
     }
     tokens
+}
+
+/// True when `(` at `i` opens a group rather than being part of a tag.
+fn at_token_start(chars: &[char], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    let prev = chars[i - 1];
+    if prev.is_whitespace() || matches!(prev, '[' | ']' | '&' | '|' | '(') {
+        return true;
+    }
+    // `-(...)` starts a negated group, but `foo-(bar)` is a tag.
+    prev == '-' && at_operator_boundary(chars, i - 1)
+}
+
+fn at_operator_boundary(chars: &[char], i: usize) -> bool {
+    i == 0
+        || chars[i - 1].is_whitespace()
+        || matches!(chars[i - 1], '[' | ']' | '&' | '|' | '(' | ')')
+}
+
+fn is_token_separator(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '[' | ']' | '&' | '|' | ')' | '-')
 }
 
 fn parse_expr_tokens(tokens: &[Tok]) -> Option<(Expr, &[Tok])> {
@@ -716,9 +1168,26 @@ fn to_dnf(expr: &Expr) -> Vec<(Vec<String>, Vec<String>)> {
         Expr::Tag(t) => vec![(vec![t.clone()], vec![])],
         Expr::Not(inner) => match inner.as_ref() {
             Expr::Tag(t) => vec![(vec![], vec![t.clone()])],
-            _ => {
-                // De Morgan: negate DNF of inner. For non-tag, skip (too complex).
-                vec![]
+            // Push negation inwards so grouped exclusions such as
+            // `-[cat | dog]` and `-(cat dog)` still become valid DNF.
+            Expr::Not(e) => to_dnf(e),
+            Expr::And(exprs) => {
+                let negated = Expr::Or(
+                    exprs
+                        .iter()
+                        .map(|e| Expr::Not(Box::new(e.clone())))
+                        .collect(),
+                );
+                to_dnf(&negated)
+            }
+            Expr::Or(exprs) => {
+                let negated = Expr::And(
+                    exprs
+                        .iter()
+                        .map(|e| Expr::Not(Box::new(e.clone())))
+                        .collect(),
+                );
+                to_dnf(&negated)
             }
         },
         Expr::And(exprs) => {
@@ -865,138 +1334,172 @@ pub async fn search_expr(
     cfg: &Config,
     params: &SearchParams,
 ) -> Result<Vec<Post>> {
-    let (metatags, rest) = split_metatags(&params.tags);
-    let expr = match parse_query_expr(&rest) {
-        Some(e) => e,
-        None => {
-            // Fall back to plain search if parsing fails.
-            return search_single(client, cfg, params).await;
-        }
-    };
-    let conjunctions = to_dnf(&expr);
-    // Drop conjunctions with no required tags (pure exclusion) to avoid
-    // fetching the entire database.
-    let conjunctions: Vec<_> = conjunctions
-        .into_iter()
-        .filter(|(req, _)| !req.is_empty())
-        .collect();
-    if conjunctions.is_empty() {
-        if metatags.is_empty() {
-            return Ok(Vec::new());
-        }
+    let (posts, _) = search_expr_window(client, cfg, params, 0, params.limit as usize).await?;
+    Ok(posts)
+}
+
+/// Execute a query and return one window of results plus whether another
+/// window may exist.
+///
+/// `count == 0` means "everything left". OR queries are fetched as separate
+/// conjunctions and interleaved, so paging through a union shows results from
+/// every branch instead of draining the first one.
+pub async fn search_expr_window(
+    client: &GelbooruClient,
+    cfg: &Config,
+    params: &SearchParams,
+    offset: usize,
+    count: usize,
+) -> Result<(Vec<Post>, bool)> {
+    let plan = compile_query(&params.tags);
+
+    if !plan.is_or() {
         let mut p = params.clone();
-        p.tags = metatags.join(" ");
-        return search_single(client, cfg, &p).await;
+        p.tags = plan.single_branch_tags();
+        let fetch_limit = if count == 0 {
+            params.limit
+        } else {
+            offset.saturating_add(count).min(u32::MAX as usize) as u32
+        };
+        p.limit = fetch_limit;
+        let posts = search_single(client, cfg, &p).await?;
+        let total = posts.len();
+        let start = offset.min(total);
+        let end = if count == 0 {
+            total
+        } else {
+            offset.saturating_add(count).min(total)
+        };
+        let has_more =
+            end < total || (count > 0 && fetch_limit > 0 && posts.len() >= fetch_limit as usize);
+        return Ok((posts[start..end].to_vec(), has_more));
     }
 
-    // Fetch each conjunction in parallel for speed.
+    search_or(client, cfg, params, &plan, offset, count).await
+}
+
+async fn search_or(
+    client: &GelbooruClient,
+    cfg: &Config,
+    params: &SearchParams,
+    plan: &QueryPlan,
+    offset: usize,
+    count: usize,
+) -> Result<(Vec<Post>, bool)> {
+    // A branch that only excludes tags matches almost the whole board, so it
+    // cannot be one side of a useful union. A lone exclusion is still handled
+    // natively above; only ORs with a positive term are enumerated.
+    let branches: Vec<&QueryBranch> = plan
+        .branches
+        .iter()
+        .filter(|branch| !branch.is_pure_exclusion())
+        .collect();
+    if branches.is_empty() {
+        return Err(crate::utils::error::AppError::Api(
+            "An OR query needs at least one positive tag; '-a | -b' cannot be enumerated"
+                .to_string(),
+        ));
+    }
+
+    let fetch_limit = if count == 0 {
+        params.limit
+    } else {
+        offset.saturating_add(count).min(u32::MAX as usize) as u32
+    };
+
+    // Fetch each conjunction in parallel. Metatags (`sort:`, `rating:`, ...)
+    // apply to every branch.
     let mut handles = Vec::new();
-    for (req, excl) in conjunctions.clone() {
+    for branch in branches {
+        let mut branch_params = params.clone();
+        let mut tags = branch.to_server_tags();
+        for metatag in &plan.metatags {
+            if !tags.is_empty() {
+                tags.push(' ');
+            }
+            tags.push_str(metatag);
+        }
+        branch_params.tags = tags;
+        branch_params.limit = fetch_limit;
         let client = client.clone();
         let cfg = cfg.clone();
-        let params = params.clone();
-        let req = req.clone();
-        let excl = excl.clone();
-        let metatags = metatags.clone();
         handles.push(tokio::spawn(async move {
-            let mut branch_params = params.clone();
-            let mut tag_str = req.join(" ");
-            for m in &metatags {
-                if !tag_str.is_empty() {
-                    tag_str.push(' ');
-                }
-                tag_str.push_str(m);
-            }
-            branch_params.tags = tag_str;
-            let posts = search_single(&client, &cfg, &branch_params).await?;
-            let mut out = Vec::new();
-            for p in posts {
-                if !excl.is_empty()
-                    && excl
-                        .iter()
-                        .any(|e| p.tag_list().iter().any(|t| t.eq_ignore_ascii_case(e)))
-                {
-                    continue;
-                }
-                out.push(p);
-            }
-            Ok::<_, crate::utils::error::AppError>(out)
+            search_single(&client, &cfg, &branch_params).await
         }));
     }
-    let mut merged: Vec<Post> = Vec::new();
-    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for h in handles {
-        let posts = h
+
+    let mut per_branch: Vec<Vec<Post>> = Vec::with_capacity(handles.len());
+    for handle in handles {
+        let posts = handle
             .await
             .map_err(|e| crate::utils::error::AppError::Http(e.to_string()))??;
-        for p in posts {
-            if p.id == 0 || seen.insert(p.id) {
-                merged.push(p);
+        per_branch.push(posts);
+    }
+
+    // Round-robin interleaving keeps every branch visible in the first page.
+    // Deduplicating by post id makes posts that match several branches appear
+    // once.
+    let mut merged = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut index = 0usize;
+    loop {
+        let mut any = false;
+        for posts in &per_branch {
+            if let Some(post) = posts.get(index) {
+                any = true;
+                if post.id == 0 || seen.insert(post.id) {
+                    merged.push(post.clone());
+                }
             }
         }
+        if !any {
+            break;
+        }
+        index += 1;
     }
-    // Determine effective sort: params.sort, or a `sort:` metatag in the query.
+
+    sort_posts(&mut merged, params, &plan.metatags);
+
+    let total = merged.len();
+    let start = offset.min(total);
+    let end = if count == 0 {
+        total
+    } else {
+        offset.saturating_add(count).min(total)
+    };
+    let branch_may_have_more = count > 0
+        && fetch_limit > 0
+        && per_branch
+            .iter()
+            .any(|posts| posts.len() >= fetch_limit as usize);
+    let has_more = end < total || branch_may_have_more;
+    Ok((merged[start..end].to_vec(), has_more))
+}
+
+/// Apply an explicit `sort`/`order` or a `sort:` metatag to merged OR results.
+fn sort_posts(posts: &mut [Post], params: &SearchParams, metatags: &[String]) {
     let meta_sort = metatags
         .iter()
         .find_map(|m| m.strip_prefix("sort:").map(|s| s.to_string()));
-    let eff_sort = params.sort.clone().or(meta_sort);
-    // Only re-sort if an explicit sort was requested; otherwise keep the
-    // API's (per-branch) order so we don't clobber a metatag sort that the
-    // API already applied. When sorting, default to descending.
-    if let Some(sort) = eff_sort {
-        let desc = params
-            .order
-            .as_deref()
-            .map(|o| o.eq_ignore_ascii_case("desc"))
-            .unwrap_or(true);
-        match sort.as_str() {
-            "score" => merged.sort_by(|a, b| {
-                if desc {
-                    b.score.cmp(&a.score)
-                } else {
-                    a.score.cmp(&b.score)
-                }
-            }),
-            "id" => merged.sort_by(|a, b| {
-                if desc {
-                    b.id.cmp(&a.id)
-                } else {
-                    a.id.cmp(&b.id)
-                }
-            }),
-            "width" => merged.sort_by(|a, b| {
-                if desc {
-                    b.width.cmp(&a.width)
-                } else {
-                    a.width.cmp(&b.width)
-                }
-            }),
-            "height" => merged.sort_by(|a, b| {
-                if desc {
-                    b.height.cmp(&a.height)
-                } else {
-                    a.height.cmp(&b.height)
-                }
-            }),
-            "created" | "date" | "created_at" => merged.sort_by(|a, b| {
-                if desc {
-                    b.created_at.cmp(&a.created_at)
-                } else {
-                    a.created_at.cmp(&b.created_at)
-                }
-            }),
-            "rating" => merged.sort_by(|a, b| {
-                if desc {
-                    b.rating.cmp(&a.rating)
-                } else {
-                    a.rating.cmp(&b.rating)
-                }
-            }),
-            _ => {}
-        }
-    }
-    if params.limit > 0 && merged.len() > params.limit as usize {
-        merged.truncate(params.limit as usize);
-    }
-    Ok(merged)
+    let Some(sort) = params.sort.clone().or(meta_sort) else {
+        return;
+    };
+    let desc = params
+        .order
+        .as_deref()
+        .map(|o| o.eq_ignore_ascii_case("desc"))
+        .unwrap_or(true);
+    let sort = sort.to_ascii_lowercase();
+    posts.sort_by(|a, b| {
+        let cmp = match sort.as_str() {
+            "score" => a.score.cmp(&b.score),
+            "id" => a.id.cmp(&b.id),
+            "width" => a.width.cmp(&b.width),
+            "height" => a.height.cmp(&b.height),
+            "created" | "date" | "created_at" => a.created_at.cmp(&b.created_at),
+            "rating" => a.rating.cmp(&b.rating),
+            _ => a.id.cmp(&b.id),
+        };
+        if desc { cmp.reverse() } else { cmp }
+    });
 }

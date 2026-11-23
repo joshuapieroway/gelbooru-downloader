@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.7] - 2026-11-23
+
+Patch release: reliable `-` and `|` search operators on Gelbooru and Rule34.
+
+### Fixed
+
+- `-tag` exclusions are now sent to the board instead of being emulated
+  client-side. Lone exclusions such as `-dog` work, and excluded results no
+  longer consume the requested result limit.
+- `|` (OR) queries fetch every branch with native `-` exclusions, interleave
+  the results so both sides are visible, and support `n`/`p` paging.
+- Grouped queries accept both `[a | b]` and `(a | b)`; tags containing
+  parentheses such as `rem_(re:zero)` stay intact.
+- Metatags (`sort:`, `rating:`, ...) are applied to every OR branch.
+
+### Tests
+
+- Added parser/compiler tests and wiremock coverage for Gelbooru and Rule34
+  exclusion, OR merging, deduplication, metatags, and paging.
+
 ## [1.2.6] - 2026-11-21
 
 Patch release: fewer images treated as comic strips.

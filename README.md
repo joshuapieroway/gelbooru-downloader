@@ -42,8 +42,11 @@ or `Tab`/`←`/`→`).
 - `/` opens the search input. Type a query; tag suggestions appear ranked by
   post count. `Tab` accepts a suggestion, `↑`/`↓` navigate suggestions or
   recall previous searches, `Enter` searches, `Esc` cancels.
-- Search treats whitespace as AND and supports `|` (OR) and `-` (NOT) plus
-  bracketed grouping: `(aisha_greyrat | norn_greyrat) mushoku_tensei`.
+- Search treats whitespace as AND, `-` as NOT, and `|` as OR. Group with
+  `[ ]` or `( )`: `[aisha_greyrat | norn_greyrat] mushoku_tensei` and
+  `cat -dog` both work on Gelbooru and Rule34. Exclusions are sent to the
+  board (`-tag`), while OR is fetched as separate branches and interleaved, so
+  paging through `cat | dog` shows results from both sides.
 - `s` switches the search tab between Gelbooru and Rule34. The current board
   is shown in the search box and results title.
 - `n`/`p` page, `+`/`-` change page size, `v`/Enter open the viewer.
